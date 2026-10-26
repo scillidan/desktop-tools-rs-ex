@@ -11,7 +11,10 @@ mod config;
 mod frame;
 mod hotkeys;
 mod interaction;
+mod mask;
+mod ocr;
 mod overlay;
+mod text;
 
 use anyhow::Result;
 use std::io::Write;
@@ -145,10 +148,18 @@ fn dispatch(action: Action, frame: HWND) {
         Action::Pin => unsafe { frame::toggle_pin(frame) },
         Action::Move => unsafe { frame::to_move(frame) },
         Action::Capture => {
+            // Read the real screen: a previous mask would be re-captured.
+            unsafe { mask::dismiss() };
             if let Err(e) = unsafe { capture::capture_frame(frame) } {
                 logline(&format!("capture failed: {e:#}"));
             } else {
                 unsafe { frame::flash_capture(frame) };
+                // P0.3: copy the image (above) AND read the words into the
+                // overlay. OCR runs on a worker thread; the frame is
+                // click-through until the mask takes over.
+                if let Err(e) = unsafe { ocr::start(frame) } {
+                    logline(&format!("ocr capture failed: {e:#}"));
+                }
             }
         }
     }

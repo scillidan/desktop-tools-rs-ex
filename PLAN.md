@@ -48,6 +48,8 @@ paste the template again with the next phase.
 |---|---|---|
 | P0.1 | Workspace shape: `dt-common` + `dt-ocr` crates | Tools share config/keys/tray; recording/scaling arrive later as own crates |
 | P0.3 | Overlay is one layered window with per-word hit-testing (Text-Grab model), click-through only while OCR runs | Spec requirement: no blocking during processing; blocking only after render |
+| P0.3 | Interim engine = `Windows.Media.Ocr` (zh-Hans-CN first, then en) | Word boxes with zero provisioning let the overlay be verified before P0.4; P0.4 swaps the provider behind `ocr::Word` |
+| P0.3 | Mask gaps use alpha 1, not 0 | Layered alpha-0 pixels pass mouse input through; the mask must own the whole frame region after render |
 | P0.4 | `auto` engine = language-table routing; explicit keys force engine | Answers the user's multi-engine interaction question with the smallest rule set; revisit after real use |
 | P1.3 | pending | choose at phase start: wrap wcap.exe vs own DDA capture |
 | P1.4 | pending | Magpie is D3D11+shader heavy; v1 may be simple ratio stretch |

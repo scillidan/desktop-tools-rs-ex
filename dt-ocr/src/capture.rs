@@ -13,7 +13,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
-use windows::Win32::System::Ole::{CF_BITMAP, CF_DIB};
+use windows::Win32::System::Ole::{CF_BITMAP, CF_DIB, CF_UNICODETEXT};
 use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 pub unsafe fn capture_frame(hwnd: HWND) -> Result<()> {
@@ -95,5 +95,32 @@ pub unsafe fn capture_frame(hwnd: HWND) -> Result<()> {
         "capture: {w}x{h} at ({},{}) -> clipboard (CF_DIB + CF_BITMAP)",
         wr.left, wr.top
     ));
+    Ok(())
+}
+
+/// Plain text for the P0.3 overlay (CF_UNICODETEXT), replacing the previous
+/// clipboard contents.
+pub unsafe fn copy_text(hwnd: HWND, text: &str) -> Result<()> {
+    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let bytes = wide.len() * 2;
+    let block = GlobalAlloc(GHND, bytes).context("GlobalAlloc failed")?;
+    anyhow::ensure!(!block.is_invalid(), "GlobalAlloc returned null");
+    let dst = GlobalLock(block);
+    anyhow::ensure!(!dst.is_null(), "GlobalLock failed");
+    ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, dst as *mut u8, bytes);
+    let _ = GlobalUnlock(block);
+
+    OpenClipboard(Some(hwnd)).context("OpenClipboard failed")?;
+    let mut clip_err = None;
+    if let Err(e) = EmptyClipboard() {
+        clip_err = Some(format!("EmptyClipboard failed: {e:?}"));
+    } else if let Err(e) = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(block.0))) {
+        clip_err = Some(format!("SetClipboardData(CF_UNICODETEXT) failed: {e:?}"));
+    }
+    let _ = CloseClipboard();
+    if let Some(e) = clip_err {
+        let _ = GlobalFree(Some(block));
+        anyhow::bail!("{e}");
+    }
     Ok(())
 }

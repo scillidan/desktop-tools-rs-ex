@@ -246,13 +246,38 @@ never hand the user a build or restart step.
       RegisterHotKey on this machine).
 
 ## P0.3 Overlay mask
-- [ ] While OCR runs, everything under the frame stays clickable.
-- [ ] After OCR: every recognized word shows as clickable text with a
-      backing box hiding the original text.
-- [ ] Click one word → clipboard holds exactly that word.
-- [ ] Drag across several words → clipboard holds one paragraph; Latin
-      words are space-joined, CJK runs have no spaces.
-- [ ] Right-click or Esc dismisses the overlay; the frame is idle again.
+Engine note: P0.3 uses the Windows built-in OCR (`Windows.Media.Ocr`, zh
+pack first, then en) so the overlay is testable without P0.4's provisioning;
+P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
+- [x] Capture (`ctrl+enter`) keeps the image capture and starts OCR on a
+      worker thread; the frame is click-through (`WS_EX_TRANSPARENT` +
+      `HTTRANSPARENT`) from the capture until the mask owns the region.
+      Observed with a fast exstyle poll in `mask_test.ps1`.
+- [x] After OCR the frame region is covered by `dt-ocr.mask`: one topmost
+      per-pixel-alpha layered window, an opaque black box per word with the
+      word re-rendered white (`Microsoft YaHei`), gaps showing the live
+      screen. Gaps use alpha 1, not 0 — an alpha-0 layered pixel is
+      click-through, alpha 1 blocks while staying invisible. Pixel-sampled:
+      box black, glyphs light, gap white.
+- [x] Click a word → `CF_UNICODETEXT` holds exactly that word.
+- [x] Press-drag a rectangle → one paragraph: Latin words space-joined, CJK
+      runs without spaces (`text::join_words`, 5 unit tests). End-to-end
+      clipboard read: `Quick brown 你好世界`.
+- [x] Esc or right-click dismisses; right-click closes on button-up so the
+      app underneath never receives the stray release. The frame is
+      interactive again in its previous mode.
+- [x] Re-capturing while the mask is open dismisses it first, so OCR reads
+      the real screen rather than our own overlay.
+- [x] `~\.temp\opencode\mask_test.ps1` drives the whole cycle at message
+      level (known Latin+CJK text window under the frame, posted capture
+      hotkey, posted click/drag/Esc/right-click): 23 checks pass, including
+      the click-through exstyle while OCR runs, `WindowFromPoint` proving
+      gaps belong to the mask and points outside the frame do not, and pin
+      surviving a capture + dismiss.
+- [ ] PHYSICAL: `ctrl+enter` over a real mixed Latin+CJK screenshot; click
+      one word; drag a paragraph; Esc; right-click.
+- [ ] PHYSICAL: while OCR runs, click a button under the frame — the click
+      must reach the app, not the frame.
 
 ## P0.4 OCR engines + language routing
 - [ ] Chinese UI text under `auto` OCRs correctly (RapidOCR path).

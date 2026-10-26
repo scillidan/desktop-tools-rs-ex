@@ -93,5 +93,18 @@ current monitor work area. `overlay.rs` = red draw band; `capture.rs` = GDI
 → clipboard CF_DIB + CF_BITMAP; `hotkeys.rs` = RegisterHotKey with the
 ported vk map. `~\.temp\opencode\frame_state_test.ps1` verifies background
 mode commands, Pin/Esc/defocus and real border geometry (mouse_event drag;
-single-event SendInput did not deliver the button-down here). Every handoff
-must rebuild LAST and check exe mtime > all src mtimes.
+single-event SendInput did not deliver the button-down here).
+
+P0.3 status: overlay mask complete. Capture keeps the image capture and starts
+Windows.Media.Ocr on a worker thread (`ocr.rs`: top-down BGRA capture →
+SoftwareBitmap → word boxes; zh-Hans-CN engine first, then en), the frame is
+click-through while it runs, and `mask.rs` shows a topmost per-pixel-alpha
+layered window over the frame: a black backing box per word with the text
+re-rendered white (Microsoft YaHei), gaps at alpha 1 so every pixel stays
+hit-testable (alpha 0 would be click-through). Click = that word on the
+clipboard; press-drag rectangle = `text::join_words` paragraph (space between
+Latin words, none inside CJK); Esc/right-click dismiss. `mask_test.ps1` drives
+the whole cycle mechanically (known Latin+CJK window, posted
+hotkey/click/drag/Esc/right-click).
+
+Every handoff must rebuild LAST and check exe mtime > all src mtimes.

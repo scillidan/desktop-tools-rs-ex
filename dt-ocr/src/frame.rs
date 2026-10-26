@@ -40,6 +40,9 @@ const STRIP_GAP: i32 = 2;
 pub struct FrameState {
     /// The single source of truth: Move / Pinned / Input / Drag / Tune.
     pub mode: Mode,
+    /// OCR worker running: the frame is click-through until it finishes
+    /// (PLAN P0.3 — nothing under the frame is blocked during recognition).
+    pub ocr_running: bool,
     /// Type-ahead buffer used by the Input state.
     pub spec: String,
     /// Show the resize status strip (`frame.show_hint`).
@@ -266,6 +269,7 @@ pub unsafe fn create(w: i32, h: i32, show_hint: bool, font: Option<String>) -> R
         GWLP_USERDATA,
         Box::into_raw(Box::new(FrameState {
             mode: Mode::Move,
+            ocr_running: false,
             spec: String::new(),
             show_hint,
             font_face: font.unwrap_or_else(|| "Consolas".to_string()),
@@ -382,27 +386,10 @@ unsafe fn set_mode(hwnd: HWND, next: Mode) {
         }
     }
 
-    // Pin is part of the mode, not an independent boolean. Only Pinned is
-    // click-through; Move/Resize hotkeys therefore unlock automatically.
-    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    let new_ex = if next == Mode::Pinned {
-        ex | WS_EX_TRANSPARENT.0 as isize
-    } else {
-        ex & !(WS_EX_TRANSPARENT.0 as isize)
-    };
-    if new_ex != ex {
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
-        SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        )
-        .ok();
-    }
+    // Pin is part of the mode, not an independent boolean. Click-through is
+    // Pinned or an OCR worker in flight, so Move/Resize hotkeys unlock
+    // automatically.
+    apply_click_through(hwnd, s);
     if next.is_resize() {
         sync_status(hwnd);
     }
@@ -413,6 +400,49 @@ unsafe fn set_mode(hwnd: HWND, next: Mode) {
 /// ctrl+t only locks. It never unlocks; ctrl+alt+m/s select another mode.
 pub unsafe fn toggle_pin(hwnd: HWND) {
     set_mode(hwnd, transition(state(hwnd).mode, Event::PinHotkey));
+}
+
+/// Click-through whenever the frame must not eat input: pinned, or while an
+/// OCR worker is reading the region underneath.
+unsafe fn apply_click_through(hwnd: HWND, s: &FrameState) {
+    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    let want = s.mode == Mode::Pinned || s.ocr_running;
+    let new_ex = if want {
+        ex | WS_EX_TRANSPARENT.0 as isize
+    } else {
+        ex & !(WS_EX_TRANSPARENT.0 as isize)
+    };
+    if new_ex == ex {
+        return;
+    }
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_ex);
+    let _ = SetWindowPos(
+        hwnd,
+        None,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+    );
+}
+
+/// OCR started/finished: keep the frame click-through until the mask owns
+/// the region, then hand it back.
+pub unsafe fn set_ocr_running(hwnd: HWND, on: bool) {
+    let s = state(hwnd);
+    if s.ocr_running == on {
+        return;
+    }
+    s.ocr_running = on;
+    apply_click_through(hwnd, s);
+}
+
+/// The frame's current screen rect.
+pub unsafe fn screen_rect(hwnd: HWND) -> Rect {
+    let mut r = RECT::default();
+    let _ = GetWindowRect(hwnd, &mut r);
+    rect_of(r)
 }
 
 unsafe fn to_drag(hwnd: HWND) {
@@ -575,7 +605,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_NCHITTEST => {
             let s = state(hwnd);
-            if s.mode == Mode::Pinned {
+            if s.mode == Mode::Pinned || s.ocr_running {
                 return LRESULT(HTTRANSPARENT as isize);
             }
             let pt = POINT {
@@ -898,6 +928,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 Mode::Pinned => LRESULT(0),
             }
+        }
+        // OCR worker finished (numbers come from the capture it took; the
+        // frame may have moved since, in which case the mask still matches
+        // the pixels that were read).
+        crate::ocr::WM_OCR_DONE => {
+            let outcome = *Box::from_raw(lparam.0 as *mut crate::ocr::Outcome);
+            set_ocr_running(hwnd, false);
+            match outcome.words {
+                Ok(words) if !words.is_empty() => {
+                    if let Err(e) = crate::mask::show(hwnd, outcome.rect, words) {
+                        logline(&format!("mask failed: {e:#}"));
+                    }
+                }
+                Ok(_) => logline("ocr: no words found"),
+                Err(e) => logline(&format!("ocr failed: {e:#}")),
+            }
+            LRESULT(0)
         }
         WM_PAINT => {
             paint(hwnd);
