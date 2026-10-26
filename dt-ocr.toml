@@ -1,0 +1,26 @@
+# dt-ocr configuration. This template lives at the repo root; rebuild_ex.ps1
+# copies it next to dt-ocr.exe on every rebuild. The running exe reads
+# dt-ocr.toml from its own directory. Bad values fall back to defaults with a
+# warning in dt-ocr.log; hotkey bindings arrive with the P0.2 frame window.
+
+[frame]
+width     = 800   # default frame width, px (16..=20000)
+height    = 600   # default frame height, px (16..=20000)
+show_hint = true  # resize status strip (input left, current size right)
+# font = "Cascadia Mono"  # status font (default Consolas; monospace recommended)
+
+# action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
+# NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows
+# defaults, but `pin = "ctrl+t"` shadows the browser new-tab combo while
+# dt-ocr is running — rebind if that bites.
+[bindings]
+draw    = "ctrl+alt+d"   # drag a rect on screen to place the frame (Esc cancels)
+resize  = "ctrl+alt+s"   # enter/reset resize; unlocks pin; i=input, w/h=tune
+pin     = "ctrl+t"       # lock only (blue, click-through); never unlocks
+capture = "ctrl+enter"   # copy the pixels under the frame; never changes mode
+move    = "ctrl+alt+m"   # Move mode (cyan); unlocks pin
+
+# resize accepts: 1600x900 (exact), 1600 (width px), x900 (height px),
+# 40%x30% / 1/2x1/3 (independent width/height), 40% or 1/2 (both axes).
+# % and fractions are of the DESKTOP (the work area of the monitor the
+# frame is currently on), not of the frame itself.

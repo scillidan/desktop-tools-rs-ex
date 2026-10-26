@@ -1,0 +1,8 @@
+[package]
+name = "dt-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared keys/layout/config primitives for desktop-tools-rs-ex"
+
+[dependencies]
+anyhow = "1"

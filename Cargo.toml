@@ -1,0 +1,12 @@
+[workspace]
+members = ["dt-common", "dt-ocr"]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"
+toml = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

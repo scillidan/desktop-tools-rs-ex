@@ -20,8 +20,9 @@ useful.
 - `Ctrl+Alt+S` resizes the frame by a SizeSpec — `1600` (width px),
   `100%` (percent of work area), `1/2` (fraction of work area); parser
   reuses desktop-tools-rs `layout::SizeSpec`.
-- `Ctrl+T` pins/unpins the frame (pin = stays put, non-interactive except
-  hotkeys). Frame may be dragged/moved when unpinned.
+- `Ctrl+T` locks the frame (pin = stays put, non-interactive except hotkeys;
+  lock-only, not a toggle). `Ctrl+Alt+M`/`Ctrl+Alt+S` unlock and select
+  Move/resize globally. Frame may be dragged/moved when unpinned.
 - `Ctrl+Enter` (or configured key) captures the region under the frame to
   clipboard/file.
 - Reference: Text-Grab's "Grab Frame".
