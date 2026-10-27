@@ -271,6 +271,19 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
 - [x] `toggle` binding (default `win+shift+o`; Win+O is reserved by Windows
       and `RegisterHotKey` fails with 1409) hides/shows the existing mask:
       same HWND, same words, no re-OCR.
+- [x] `[mask] font` / `[mask] size` (points, default 10 = the dotfiles
+      WezTerm font_size) / `[mask] layout = "overlay" | "reader"`. Fixed size
+      is the default, so re-rendered words no longer change size from one
+      word to the next; `size = "auto"` keeps the source size and now takes
+      the per-line median height (was per word). The default face is Sarasa
+      Term SC Nerd, the WezTerm face, so mask text matches the terminal.
+- [x] `layout = "reader"` paints an opaque black page and reflows the
+      recognised text at the fixed size: OCR lines are joined with
+      `join_words`, a vertical gap >= one line height starts a new paragraph
+      (`\n\n`), and a click copies the whole text. Position-faithful overlay
+      stays the default.
+- [x] Reader and overlay share `toggle`, Esc, right-click and re-capture
+      (which dismisses the previous mask).
 - [x] Esc or right-click dismisses; right-click closes on button-up so the
       app underneath never receives the stray release. The frame is
       interactive again in its previous mode.
@@ -283,10 +296,14 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
       gaps belong to the mask and points outside the frame do not, the
       continuous line band, the toggle hide/show with an unchanged HWND, and
       pin surviving a capture + dismiss.
+- [x] `~\.temp\opencode\reader_test.ps1`: hot-reloads `layout = "reader"`,
+      checks the opaque black page, light text pixels and that a click copies
+      `Quick brown 你好世界` (one reflowed paragraph).
 - [ ] PHYSICAL: `ctrl+enter` over a real mixed Latin+CJK screenshot; click
       one word; drag a two-line paragraph (paste must keep the line break);
       `win+shift+o` twice (hide/show, no re-OCR); switch `fill = "boxes"` to
-      compare; Esc; right-click.
+      compare; set `size = "auto"` and compare; `layout = "reader"` over a
+      long paragraph and click to copy all; Esc; right-click.
 - [ ] PHYSICAL: while OCR runs, click a button under the frame — the click
       must reach the app, not the frame.
 

@@ -123,6 +123,10 @@ the glyphs keep their OCR positions, so Latin/CJK spacing is exact and word
 hit-testing stays aligned. `"boxes"` restores the per-word look. Selections
 copy with `\n` between OCR lines. The new `toggle` binding (default
 `win+shift+o`; Win+O is reserved by Windows) hides/shows the existing mask
-with the same HWND, no re-OCR.
+with the same HWND, no re-OCR. `[mask]` also carries `font` (default Sarasa
+Term SC Nerd, the WezTerm face), `size` in points (default 10 = WezTerm's
+`font_size`; "auto" = per-line source height) and `layout = "overlay" |
+"reader"`. Reader paints an opaque page and reflows the text at the fixed
+size, paragraphs separated by a blank line; a click copies the whole text.
 
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

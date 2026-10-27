@@ -61,6 +61,7 @@ fn run() -> Result<()> {
     let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
     let cfg = config::parse(&text)?;
     mask::set_fill(cfg.mask_fill);
+    mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
     logline(&format!(
         "config loaded from {} (frame {}x{})",
         cfg_path.display(),
@@ -122,6 +123,11 @@ fn run() -> Result<()> {
                             )
                         };
                         mask::set_fill(new_cfg.mask_fill);
+                        mask::set_style(
+                            new_cfg.mask_font.clone(),
+                            new_cfg.mask_size,
+                            new_cfg.mask_layout,
+                        );
                     }
                     Err(e) => logline(&format!("config reload failed, keeping old: {e:#}")),
                 }

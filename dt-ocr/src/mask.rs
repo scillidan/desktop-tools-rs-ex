@@ -10,17 +10,19 @@
 //! frame region (PLAN: click-through only *while* OCR runs).
 
 use crate::capture::copy_text;
-use crate::config::MaskFill;
+use crate::config::{MaskFill, MaskLayout, MaskSize};
 use crate::logline;
 use crate::ocr::Word;
 use crate::text::join_words;
 use anyhow::{ensure, Context, Result};
 use dt_common::layout::Rect;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_ESCAPE,
 };
@@ -31,7 +33,36 @@ const BG_ALPHA: u32 = 0x0100_0000;
 const BOX_ALPHA: u32 = 0xFF00_0000;
 const TEXT_WHITE: u32 = 0x00FF_FFFF;
 const SELECT_YELLOW: u32 = 0x0000D2FF; // RGB(255, 210, 0)
-const TEXT_FACE: &str = "Microsoft YaHei"; // Latin + CJK in one face
+const DEFAULT_FACE: &str = "Sarasa Term SC Nerd";
+
+/// `[mask]` style resolved when a mask opens: font face, size and layout.
+#[derive(Clone)]
+struct Style {
+    font: String,
+    size: MaskSize,
+    layout: MaskLayout,
+}
+
+static STYLE: Mutex<Style> = Mutex::new(Style {
+    font: String::new(),
+    size: MaskSize::Auto,
+    layout: MaskLayout::Overlay,
+});
+
+/// Live config (`main` calls this at startup and on every hot-reload).
+pub fn set_style(font: String, size: MaskSize, layout: MaskLayout) {
+    if let Ok(mut s) = STYLE.lock() {
+        *s = Style { font, size, layout };
+    }
+}
+
+fn style() -> Style {
+    STYLE.lock().map(|s| s.clone()).unwrap_or(Style {
+        font: DEFAULT_FACE.to_string(),
+        size: MaskSize::Pt(10),
+        layout: MaskLayout::Overlay,
+    })
+}
 
 struct MaskState {
     parent: HWND,
@@ -51,6 +82,17 @@ struct MaskState {
     /// Left-button drag origin (client coords) while selecting.
     drag: Option<POINT>,
     selected: Vec<usize>,
+    /// Reader-mode text (None = overlay layout).
+    reader: Option<String>,
+}
+
+/// Style resolved for one draw pass (keeps `draw_base` under the clippy arg
+/// limit).
+struct Base<'a> {
+    fixed_em: Option<i32>,
+    layout: MaskLayout,
+    face: &'a [u16],
+    reader: Option<&'a str>,
 }
 
 static MASK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -156,7 +198,34 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>) -> Result<()> {
     let bits = bits as *mut u32;
     let len = (w * h) as usize;
     std::ptr::write_bytes(bits as *mut u8, 0, len * 4);
-    draw_base(memdc, bits, w, h, &words);
+    let style = style();
+    let dpi = match GetDpiForWindow(parent) {
+        0 => 96,
+        d => d,
+    };
+    let fixed_em = match style.size {
+        MaskSize::Auto => None,
+        MaskSize::Pt(pt) => Some(((pt as i32 * dpi as i32 + 36) / 72).max(6)),
+    };
+    let reader = if style.layout == MaskLayout::Reader {
+        Some(reader_text(&words))
+    } else {
+        None
+    };
+    let face_w = wide(&style.font);
+    draw_base(
+        memdc,
+        bits,
+        w,
+        h,
+        &words,
+        &Base {
+            fixed_em,
+            layout: style.layout,
+            face: &face_w,
+            reader: reader.as_deref(),
+        },
+    );
 
     let prev_fg = GetForegroundWindow();
     let hwnd = CreateWindowExW(
@@ -188,6 +257,7 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>) -> Result<()> {
             old_bitmap,
             drag: None,
             selected: Vec::new(),
+            reader,
         })) as isize,
     );
     MASK.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
@@ -198,9 +268,18 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>) -> Result<()> {
     // The first word + rect is the cheapest way to see, from the log alone,
     // what the engine found and where a click test can aim.
     let s = state(hwnd);
+    let mode = match (style.layout, fill_lines()) {
+        (MaskLayout::Reader, _) => "reader",
+        (MaskLayout::Overlay, true) => "overlay:lines",
+        (MaskLayout::Overlay, false) => "overlay:boxes",
+    };
     logline(&format!(
-        "mask: {} words over {w}x{h} at ({},{}), first `{}` {:?}",
+        "mask: {mode}, {} words, font {}+{}px over {w}x{h} at ({},{}), first `{}` {:?}",
         s.words.len(),
+        style.font,
+        fixed_em
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "auto".into()),
         rect.l,
         rect.t,
         s.words[0].text,
@@ -269,15 +348,152 @@ fn selection_text(words: &[Word], mut picked: Vec<usize>) -> String {
         .join("\n")
 }
 
-/// Draws every word box + white text once, then resolves the alpha channel:
-/// boxes and glyph pixels opaque, everything else the invisible-but-solid
-/// background alpha.
-unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word]) {
+/// Paragraphs for reader mode: OCR lines are joined into one flow (spaces via
+/// `join_words`) and separated by a blank line when the vertical gap is at
+/// least one line height.
+fn reader_text(words: &[Word]) -> String {
+    let mut lines: Vec<(i32, i32, Vec<&Word>)> = Vec::new();
+    for w in words {
+        match lines.last_mut() {
+            Some((t, b, ws)) if ws[0].line == w.line => {
+                *t = (*t).min(w.rect.t);
+                *b = (*b).max(w.rect.b);
+                ws.push(w);
+            }
+            _ => lines.push((w.rect.t, w.rect.b, vec![w])),
+        }
+    }
+    let mut paras: Vec<Vec<&Word>> = Vec::new();
+    let mut prev: Option<(i32, i32)> = None;
+    for (t, b, ws) in lines {
+        let height = (b - t).max(1);
+        let new_para = match prev {
+            Some((pt, pb)) => t - pb > height.min((pb - pt).max(1)),
+            None => true,
+        };
+        if new_para {
+            paras.push(Vec::new());
+        }
+        paras.last_mut().unwrap().extend(ws);
+        prev = Some((t, b));
+    }
+    paras
+        .iter()
+        .map(|ws| join_words(ws.iter().map(|w| w.text.as_str())))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Em size (px) per OCR line from the line's median word height: auto mode
+/// keeps a line uniform instead of sizing every word on its own box.
+fn line_ems(words: &[Word]) -> Vec<(u32, i32)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let line = words[i].line;
+        let start = i;
+        while i < words.len() && words[i].line == line {
+            i += 1;
+        }
+        let mut heights: Vec<i32> = words[start..i].iter().map(|w| w.rect.h()).collect();
+        heights.sort_unstable();
+        let median = heights[heights.len() / 2].max(1);
+        out.push((line, (median * 4 / 5).clamp(6, 96)));
+    }
+    out
+}
+
+fn line_em(ems: &[(u32, i32)], line: u32) -> i32 {
+    ems.iter()
+        .find(|(l, _)| *l == line)
+        .map(|(_, em)| *em)
+        .unwrap_or(13)
+}
+
+fn median_line_em(words: &[Word]) -> i32 {
+    let mut ems: Vec<i32> = line_ems(words).into_iter().map(|(_, em)| em).collect();
+    ems.sort_unstable();
+    ems.get(ems.len() / 2).copied().unwrap_or(13)
+}
+
+unsafe fn font_for(face: &[u16], em: i32, fonts: &mut Vec<(i32, HFONT)>) -> HFONT {
+    if let Some((_, font)) = fonts.iter().find(|(size, _)| *size == em) {
+        return *font;
+    }
+    let font = CreateFontW(
+        -em,
+        0,
+        0,
+        0,
+        FW_NORMAL.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY,
+        DEFAULT_PITCH.0 as u32,
+        windows::core::PCWSTR(face.as_ptr()),
+    );
+    fonts.push((em, font));
+    font
+}
+
+/// Draws the mask base once. Overlay: black boxes/bands plus white text at the
+/// OCR positions. Reader: an opaque black page with the reflowed text. Then
+/// resolves the alpha channel: drawn pixels opaque, everything else the
+/// invisible-but-solid background alpha.
+unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word], base: &Base) {
     let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(TEXT_WHITE));
     let black = CreateSolidBrush(COLORREF(0));
-    let face = wide(TEXT_FACE);
     let mut fonts: Vec<(i32, HFONT)> = Vec::new();
+
+    if base.layout == MaskLayout::Reader {
+        let page = RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
+        let _ = FillRect(hdc, &page, black);
+        for i in 0..(w * h) as usize {
+            *bits.add(i) = BOX_ALPHA;
+        }
+        if let Some(text) = base.reader {
+            let em = base.fixed_em.unwrap_or_else(|| median_line_em(words));
+            let font = font_for(base.face, em, &mut fonts);
+            let old = SelectObject(hdc, font.into());
+            let mut text: Vec<u16> = text.encode_utf16().collect();
+            let mut rc = RECT {
+                left: 10,
+                top: 8,
+                right: (w - 10).max(12),
+                bottom: (h - 8).max(10),
+            };
+            let _ = DrawTextW(
+                hdc,
+                &mut text,
+                &mut rc,
+                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX,
+            );
+            let _ = SelectObject(hdc, old);
+        }
+        let _ = DeleteObject(black.into());
+        for (_, font) in fonts {
+            let _ = DeleteObject(font.into());
+        }
+        // The page is already opaque; glyph pixels arrive with alpha 0.
+        for i in 0..(w * h) as usize {
+            let p = *bits.add(i);
+            if p & 0x00FF_FFFF != 0 {
+                *bits.add(i) = p | BOX_ALPHA;
+            }
+        }
+        return;
+    }
+
     // `lines`: one continuous band per line segment, so the gaps between
     // words stop showing the screen through. The glyphs keep their OCR
     // positions, so Latin spaces and CJK spacing stay exactly as rendered.
@@ -296,6 +512,7 @@ unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word]) {
             }
         }
     }
+    let ems = line_ems(words);
     for word in words {
         let rc = clip_rect(word.rect, w, h);
         if rc.w() < 2 || rc.h() < 2 {
@@ -312,30 +529,8 @@ unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word]) {
                 }
             }
         }
-        let em = (rc.h() * 4 / 5).clamp(8, 64);
-        let font = match fonts.iter().find(|(size, _)| *size == em) {
-            Some((_, f)) => *f,
-            None => {
-                let f = CreateFontW(
-                    -em,
-                    0,
-                    0,
-                    0,
-                    FW_NORMAL.0 as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET,
-                    OUT_DEFAULT_PRECIS,
-                    CLIP_DEFAULT_PRECIS,
-                    ANTIALIASED_QUALITY,
-                    DEFAULT_PITCH.0 as u32,
-                    windows::core::PCWSTR(face.as_ptr()),
-                );
-                fonts.push((em, f));
-                f
-            }
-        };
+        let em = base.fixed_em.unwrap_or_else(|| line_em(&ems, word.line));
+        let font = font_for(base.face, em, &mut fonts);
         let old = SelectObject(hdc, font.into());
         let mut text: Vec<u16> = word.text.encode_utf16().collect();
         let mut text_rc = to_win(rc);
@@ -344,7 +539,7 @@ unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word]) {
             hdc,
             &mut text,
             &mut text_rc,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
         let _ = SelectObject(hdc, old);
     }
@@ -504,13 +699,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_LBUTTONDOWN => {
             let s = state(hwnd);
+            let _ = SetCapture(hwnd);
+            if s.reader.is_some() {
+                return LRESULT(0);
+            }
             s.drag = Some(point());
             s.selected.clear();
-            let _ = SetCapture(hwnd);
             present(hwnd);
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            if state(hwnd).reader.is_some() {
+                return LRESULT(0);
+            }
             let Some(start) = state(hwnd).drag else {
                 return LRESULT(0);
             };
@@ -527,8 +728,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            let start = state(hwnd).drag.take();
             let _ = ReleaseCapture();
+            if let Some(text) = state(hwnd).reader.clone() {
+                match copy_text(hwnd, &text) {
+                    Ok(()) => logline(&format!(
+                        "mask: copied {} chars (reader): {}",
+                        text.chars().count(),
+                        preview(&text)
+                    )),
+                    Err(e) => logline(&format!("mask: clipboard failed: {e:#}")),
+                }
+                return LRESULT(0);
+            }
+            let start = state(hwnd).drag.take();
             if let Some(start) = start {
                 finish_selection(hwnd, start, point());
             }
@@ -640,6 +852,33 @@ mod tests {
         let text = selection_text(&words, vec![4, 1, 3, 0, 2]);
         assert_eq!(text, "Quick brown 你好\nworld");
         assert_eq!(selection_text(&words, vec![1]), "brown");
+    }
+
+    #[test]
+    fn reader_joins_lines_and_separates_paragraphs() {
+        let words = [
+            word_on(0, "Hello", 0, 0, 40, 20),
+            word_on(0, "world", 50, 0, 90, 20),
+            word_on(1, "again", 0, 25, 40, 45),
+            word_on(2, "你好", 0, 90, 40, 110),
+            word_on(2, "世界", 45, 90, 80, 110),
+        ];
+        assert_eq!(reader_text(&words), "Hello world again\n\n你好世界");
+    }
+
+    #[test]
+    fn auto_size_is_per_line_median() {
+        let words = [
+            word_on(0, "a", 0, 0, 10, 10),
+            word_on(0, "b", 12, 0, 22, 30),
+            word_on(0, "c", 24, 0, 34, 20),
+            word_on(1, "d", 0, 40, 10, 60),
+        ];
+        let ems = line_ems(&words);
+        assert_eq!(ems.len(), 2);
+        assert_eq!(line_em(&ems, 0), 16);
+        assert_eq!(line_em(&ems, 1), 16);
+        assert_eq!(line_em(&ems, 9), 13);
     }
 
     #[test]

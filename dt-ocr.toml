@@ -23,8 +23,15 @@ language = "auto"
 # OCR result layer: "lines" = one continuous black band per OCR line segment
 # (gaps between words are filled; glyphs stay at their recognised positions,
 # so Latin spaces and CJK spacing are preserved), "boxes" = one box per word.
-# Hot-reloads.
+# Hot-reloads. Ignored in reader layout.
 fill = "lines"
+# "overlay" keeps the recognised positions; "reader" reflows the text as one
+# wrapped page (a click copies the whole text).
+layout = "overlay"
+# Text face and size in points ("auto" = size each line from its source
+# height). Defaults match the dotfiles WezTerm config: Sarasa Term SC Nerd 10.
+font = "Sarasa Term SC Nerd"
+size = 10
 
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
 # NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows

@@ -29,6 +29,14 @@ pub struct Config {
     /// geometry) or one continuous band per OCR line segment (words keep
     /// their exact positions; only the gaps between them are filled).
     pub mask_fill: MaskFill,
+    /// Mask text layout: `overlay` keeps the original geometry, `reader`
+    /// reflows the text as one wrapped document.
+    pub mask_layout: MaskLayout,
+    /// Mask font face (default = the dotfiles WezTerm font, Sarasa Term SC
+    /// Nerd, so re-rendered text matches the terminal).
+    pub mask_font: String,
+    /// Mask text size in points; `Auto` keeps the per-line source height.
+    pub mask_size: MaskSize,
     pub bindings: Bindings,
 }
 
@@ -36,6 +44,20 @@ pub struct Config {
 pub enum MaskFill {
     Boxes,
     Lines,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskLayout {
+    Overlay,
+    Reader,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskSize {
+    /// Legacy: size each line from its OCR box height.
+    Auto,
+    /// One fixed size for all text, in points (WezTerm's `font_size` unit).
+    Pt(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +163,9 @@ impl Default for Config {
             ocr_scale: 4,
             ocr_language: None,
             mask_fill: MaskFill::Lines,
+            mask_layout: MaskLayout::Overlay,
+            mask_font: "Sarasa Term SC Nerd".to_string(),
+            mask_size: MaskSize::Pt(10),
             bindings: Bindings::default(),
         }
     }
@@ -223,6 +248,34 @@ pub fn parse(text: &str) -> Result<Config> {
                         }
                     }
                 }
+                if let Some(v) = t.get("layout") {
+                    match v.as_str() {
+                        Some("overlay") => cfg.mask_layout = MaskLayout::Overlay,
+                        Some("reader") => cfg.mask_layout = MaskLayout::Reader,
+                        _ => eprintln!(
+                            "warn: mask.layout must be \"overlay\" or \"reader\"; using overlay"
+                        ),
+                    }
+                }
+                if let Some(v) = t.get("font") {
+                    match v.as_str() {
+                        Some(s) if !s.is_empty() => cfg.mask_font = s.to_string(),
+                        _ => eprintln!(
+                            "warn: mask.font must be a non-empty string; using the default"
+                        ),
+                    }
+                }
+                if let Some(v) = t.get("size") {
+                    match v {
+                        toml::Value::String(s) if s == "auto" => cfg.mask_size = MaskSize::Auto,
+                        toml::Value::Integer(n) if (1..=72).contains(n) => {
+                            cfg.mask_size = MaskSize::Pt(*n as u32)
+                        }
+                        _ => eprintln!(
+                            "warn: mask.size must be \"auto\" or 1..=72 (points); using 10"
+                        ),
+                    }
+                }
             }
             None => eprintln!("warn: [mask] must be a table; using defaults"),
         }
@@ -232,7 +285,7 @@ pub fn parse(text: &str) -> Result<Config> {
             Some(t) => {
                 for (name, value) in t {
                     let Some(action) = Action::ALL.iter().find(|a| a.name() == name) else {
-                        eprintln!("warn: unknown binding `{name}` (known: draw, resize, pin, capture, move); skipped");
+                        eprintln!("warn: unknown binding `{name}` (known: draw, resize, pin, capture, move, toggle); skipped");
                         continue;
                     };
                     match value.as_str() {
@@ -268,6 +321,9 @@ mod tests {
                 ocr_scale: 4,
                 ocr_language: None,
                 mask_fill: MaskFill::Lines,
+                mask_layout: MaskLayout::Overlay,
+                mask_font: "Sarasa Term SC Nerd".to_string(),
+                mask_size: MaskSize::Pt(10),
                 bindings: Bindings::default(),
             }
         );
@@ -348,6 +404,31 @@ mod tests {
             MaskFill::Lines
         );
         assert_eq!(parse("mask = 1\n").unwrap().mask_fill, MaskFill::Lines);
+    }
+
+    #[test]
+    fn mask_style_parses() {
+        let cfg = parse("[mask]\nlayout = \"reader\"\nfont = \"Consolas\"\nsize = 12\n").unwrap();
+        assert_eq!(cfg.mask_layout, MaskLayout::Reader);
+        assert_eq!(cfg.mask_font, "Consolas");
+        assert_eq!(cfg.mask_size, MaskSize::Pt(12));
+        assert_eq!(
+            parse("[mask]\nsize = \"auto\"\n").unwrap().mask_size,
+            MaskSize::Auto
+        );
+        // Invalid values keep the fixed-size default.
+        assert_eq!(
+            parse("[mask]\nsize = 0\n").unwrap().mask_size,
+            MaskSize::Pt(10)
+        );
+        assert_eq!(
+            parse("[mask]\nsize = 100\n").unwrap().mask_size,
+            MaskSize::Pt(10)
+        );
+        assert_eq!(
+            parse("[mask]\nlayout = \"page\"\n").unwrap().mask_layout,
+            MaskLayout::Overlay
+        );
     }
 
     #[test]

@@ -55,6 +55,9 @@ paste the template again with the next phase.
 | P0.3 | Mask fill = continuous band per OCR line segment (`[mask] fill = "lines"`, default) | "Connected text" look without reflow: glyphs keep OCR positions, so spacing is exact by construction and word hit-testing stays aligned; gaps > 3/4 em (tabs/columns) stay separate |
 | P0.3 | `toggle` binding = `win+shift+o`, hides/shows the existing mask | Win+O is reserved by Windows (RegisterHotKey 1409); toggling must not re-run OCR, so the HWND and words are reused |
 | P0.3 | Selection text = `join_words` inside a line + `\n` between OCR lines | Preserves line breaks, spaces between Latin words, no spaces inside CJK |
+| P0.3 | Mask text = fixed size by default (`[mask] size`, points; auto = per-line median) | Per-word sizing made words jump between sizes; fixed 10 pt matches the user's WezTerm font, auto remains available |
+| P0.3 | `[mask] font` default = Sarasa Term SC Nerd (the dotfiles WezTerm face) | Re-rendered text matches the terminal the user actually reads |
+| P0.3 | `layout = "reader"`: opaque page, reflowed text, paragraph gaps, click copies all | A readable mode separate from the position-faithful overlay |
 | P0.4 | RapidOCR measured (AHK-ScreenOCR CLI): 4/4 lines at native res, ~1.6 s/run, line boxes only | Best quality by far; needs a persistent worker for latency and a word-splitting plan to keep word-level clicks |
 | P0.4 | `auto` engine = language-table routing; explicit keys force engine | Answers the user's multi-engine interaction question with the smallest rule set; revisit after real use |
 | P1.3 | pending | choose at phase start: wrap wcap.exe vs own DDA capture |
