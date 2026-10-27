@@ -291,7 +291,7 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
       the real screen rather than our own overlay.
 - [x] `~\.temp\opencode\mask_test.ps1` drives the whole cycle at message
       level (known Latin+CJK text window under the frame, posted capture
-      hotkey, posted click/drag/Esc/right-click): 24 checks pass, including
+      hotkey, posted click/drag/Esc/right-click): 27 checks pass, including
       the click-through exstyle while OCR runs, `WindowFromPoint` proving
       gaps belong to the mask and points outside the frame do not, the
       continuous line band, the toggle hide/show with an unchanged HWND, and
