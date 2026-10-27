@@ -19,6 +19,10 @@ never hand the user a build or restart step.
       line shows it.
 
 ## P0.2 OCR frame window
+- [ ] Drag every edge and corner: the pointer stays on the dragged edge, the
+      opposite edge stays fixed, and repeated upward drags never collapse the
+      frame. Mechanical mouse-event regression passed 2026-10-27 for repeated
+      top drags, all four corners, work-area clamping, and drag/move repaint.
 - [x] Draw a frame by dragging (`ctrl+alt+d`): full-virtual-screen crosshair
       overlay, Esc cancels, <9 px drags ignored; the frame lands where drawn
       and stays on top (`hotkey probe: ctrl+alt+s held` passes; physical drag
@@ -245,6 +249,24 @@ never hand the user a build or restart step.
       key presses still require user verification (injection cannot trigger
       RegisterHotKey on this machine).
 
+## P0.2 desktop behavior, bounds and identity (2026-10-27)
+- [x] Border drag uses stable GetCursorPos screen coordinates, not client
+      coordinates that move with the frame. Repeated top-edge and all-corner
+      drags pass; the opposite edge stays fixed and work-area clamping works.
+- [x] `[frame] work_area` defaults true (exclude taskbar); false selects the
+      full monitor for pointer, keyboard and SizeSpec sizing and hot-reloads.
+      frame_work_area_test passes: false dragged to screen bottom 1080, then
+      restoring true re-clamped to work bottom 1032.
+- [x] One process owns one frame per virtual desktop. WS_EX_APPWINDOW gives
+      each frame a shell desktop identity; the current desktop's global hotkey
+      creates or reuses its frame, and frames moved together by closing a
+      desktop are deduplicated. virtual_desktop_repro verifies desktop IDs,
+      DWM cloaking, create/reuse and desktop-close cleanup.
+- [x] Icons: both use a hollow title bar over a full body; desktop-tools-rs
+      fills the body, -ex diagonal-hatches it. Multi-size ICOs are embedded;
+      -ex has a native right-click Quit tray. Pixel/ICO tests pass, and
+      tray_quit_test uses SendNotifyMessage through the real wndproc path.
+
 ## P0.3 Overlay mask
 Engine note: P0.3 uses the Windows built-in OCR (`Windows.Media.Ocr`, zh
 pack first, then en) so the overlay is testable without P0.4's provisioning;
@@ -259,10 +281,10 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
       3/4 em are filled; tabs/columns stay separate) with the words
       re-rendered white (`Microsoft YaHei`) at their exact OCR positions, so
       Latin spaces and CJK spacing need no re-layout; `"boxes"` restores the
-      per-word look. Gaps use alpha 1, not 0 — an alpha-0 layered pixel is
-      click-through, alpha 1 blocks while staying invisible. Pixel-sampled:
-      box black, glyphs light, inter-line gap live, band continuous between
-      words.
+      per-word look. Untouched pixels come from the native BGRA snapshot taken
+      with the OCR capture; every layered pixel is opaque and hit-testable.
+      Pixel-sampled: box black, glyphs light, gap frozen, band continuous
+      between words.
 - [x] Click a word → `CF_UNICODETEXT` holds exactly that word.
 - [x] Press-drag a rectangle → one selection in reading order: `join_words`
       inside a line (Latin spaces, no CJK spaces) and `\n` between OCR lines
@@ -307,6 +329,20 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
 - [ ] PHYSICAL: while OCR runs, click a button under the frame — the click
       must reach the app, not the frame.
 
+### Frozen snapshot base (2026-10-27)
+
+- [x] `Outcome` carries the full-frame native BGRA capture; OCR still uses the
+      upscaled inset, and overlay gaps composite over the frozen pixels rather
+      than the live screen. All mask pixels are opaque and hit-testable.
+- [x] Mechanical: `mask_test.ps1` passes capture, hit-testing, rendering, word
+      click, line-break selection and frozen-base checks (14 checks), including
+      recoloring the source without changing the mask. Its later exact-CJK
+      assertion still fails on this machine's Windows OCR; not a snapshot
+      regression.
+- [ ] PHYSICAL: capture, then scroll or change the app underneath without
+      dismissing the mask. The whole frame image must stay frozen and aligned;
+      word click, drag-copy, toggle and dismiss must still work.
+
 ### OCR quality (post-P0.3 feedback: small/compact fonts)
 
 - [x] Native resolution was unusable on 8-10 pt screen text (`The qu1Ck 0r0
@@ -344,6 +380,16 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
 ## P0.5 Auto-refresh triggers
 - [ ] Text inside the frame changes → re-OCR happens by itself.
 - [ ] Static frame → no re-OCR (no flicker, no CPU spin).
+
+## P0.6 Release packaging
+- [x] Tag-driven GitHub Actions release packages dt-ocr.exe + dt-ocr.toml,
+      with a matching .sha256 file and consistent desktop-tools-rs-ex names.
+- [x] scoop-pile pulled with git pull --ff-only. window-tools-rs.json renamed
+      to desktop-tools-rs.json; v0.1.0 pre_install handles its old bundled exe
+      and config names, while autoupdate uses the new asset names.
+- [ ] desktop-tools-rs-ex.json is prepared for v0.1.0 but intentionally has an
+      empty hash until the first release publishes the .sha256. Do not call it
+      installable yet. JSON parsing passes for both manifests.
 
 ## P1.x
 - [ ] (filled when each P1 phase starts)

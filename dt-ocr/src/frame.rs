@@ -31,6 +31,10 @@ const BAR_YELLOW: u32 = 0x0000D2FF; // RGB(255, 210, 0) — status strip bg / in
 const TEXT_BLACK: u32 = 0x00000000;
 const TUNE_RED: u32 = 0x000000FF; // RGB(255, 0, 0) — value clamped at the monitor limit
 const FLASH_CYAN: u32 = 0x00FFFF00; // RGB(0, 255, 255) — capture feedback flash
+                                    // APPWINDOW gives the shell a per-virtual-desktop application view.
+                                    // Without it this popup is considered current on every desktop.
+const FRAME_EX_STYLE: WINDOW_EX_STYLE =
+    WINDOW_EX_STYLE(WS_EX_LAYERED.0 | WS_EX_TOPMOST.0 | WS_EX_NOACTIVATE.0 | WS_EX_APPWINDOW.0);
 const EDGE: i32 = 6; // border hit zone (px) for the spec-mode resize handles
 /// Height of the status strip shown OUTSIDE the frame (below preferred,
 /// above as fallback), and the gap between frame border and strip.
@@ -38,6 +42,8 @@ const STRIP_H: i32 = 24;
 const STRIP_GAP: i32 = 2;
 
 pub struct FrameState {
+    /// Exclude the taskbar from movement and sizing bounds.
+    pub work_area: bool,
     /// The single source of truth: Move / Pinned / Input / Drag / Tune.
     pub mode: Mode,
     /// OCR worker running: the frame is click-through until it finishes
@@ -135,21 +141,28 @@ pub(crate) fn rect_of(r: RECT) -> Rect {
     }
 }
 
-/// Work area of the monitor `hwnd` is currently on (fallback: primary).
-/// Percent/fraction specs resolve against this — resizing a frame on the
-/// secondary monitor must not drag it back onto the primary.
-fn monitor_work_area(hwnd: HWND) -> Rect {
-    unsafe {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut mi = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !monitor.is_invalid() && GetMonitorInfoW(monitor, &mut mi).as_bool() {
-            return rect_of(mi.rcWork);
-        }
+/// Configured bounds of the monitor `hwnd` is on (fallback: primary).
+/// Percent/fraction specs use the same bounds as pointer and keyboard sizing.
+unsafe fn monitor_bounds(hwnd: HWND) -> Rect {
+    let full = state_opt(hwnd).is_some_and(|s| !s.work_area);
+    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !monitor.is_invalid() && GetMonitorInfoW(monitor, &mut mi).as_bool() {
+        return rect_of(if full { mi.rcMonitor } else { mi.rcWork });
     }
-    work_area()
+    if full {
+        Rect {
+            l: 0,
+            t: 0,
+            r: GetSystemMetrics(SM_CXSCREEN),
+            b: GetSystemMetrics(SM_CYSCREEN),
+        }
+    } else {
+        work_area()
+    }
 }
 
 /// Primary monitor's work area, in physical pixels (the process is
@@ -191,6 +204,7 @@ pub fn work_area() -> Rect {
 pub unsafe fn create(
     w: i32,
     h: i32,
+    use_work_area: bool,
     show_hint: bool,
     font: Option<String>,
     ocr_scale: u32,
@@ -198,24 +212,35 @@ pub unsafe fn create(
 ) -> Result<HWND> {
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
     let class = w!("dt-ocr.frame");
+    let resource = windows::core::PCWSTR::from_raw(std::ptr::without_provenance(1));
+    let app_icon = LoadIconW(Some(instance), resource).unwrap_or_default();
     let wc = WNDCLASSW {
         style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(wndproc),
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: instance,
-        hIcon: HICON::default(),
+        hIcon: app_icon,
         hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
         hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as _),
         lpszMenuName: windows::core::PCWSTR::null(),
         lpszClassName: windows::core::PCWSTR(class.as_ptr()),
     };
     ensure!(
-        RegisterClassW(&wc) != 0,
+        RegisterClassW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS,
         "RegisterClassW(frame) failed: {}",
         windows::core::Error::from_win32()
     );
-    let work = work_area();
+    let work = if use_work_area {
+        work_area()
+    } else {
+        Rect {
+            l: 0,
+            t: 0,
+            r: GetSystemMetrics(SM_CXSCREEN),
+            b: GetSystemMetrics(SM_CYSCREEN),
+        }
+    };
     let pos = dt_common::layout::center(
         work,
         Rect {
@@ -226,7 +251,7 @@ pub unsafe fn create(
         },
     );
     let hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        FRAME_EX_STYLE,
         class,
         w!("dt-ocr"),
         WS_POPUP | WS_VISIBLE,
@@ -279,6 +304,7 @@ pub unsafe fn create(
         hwnd,
         GWLP_USERDATA,
         Box::into_raw(Box::new(FrameState {
+            work_area: use_work_area,
             mode: Mode::Move,
             ocr_running: false,
             spec: String::new(),
@@ -321,6 +347,7 @@ unsafe fn state_opt(hwnd: HWND) -> Option<&'static mut FrameState> {
 /// Live-update the status-strip prefs and the OCR scale (config hot-reload).
 pub unsafe fn set_prefs(
     hwnd: HWND,
+    work_area: bool,
     show: bool,
     font: Option<String>,
     ocr_scale: u32,
@@ -339,6 +366,19 @@ pub unsafe fn set_prefs(
     }
     s.ocr_scale = ocr_scale.clamp(1, 4);
     s.ocr_language = ocr_language;
+    if s.work_area != work_area {
+        s.work_area = work_area;
+        let r = screen_rect(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            r.l,
+            r.t,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
 }
 
 /// Configured OCR upscale factor (read when a capture starts).
@@ -428,7 +468,7 @@ unsafe fn set_mode(hwnd: HWND, next: Mode) {
     logline(&format!("mode: {next:?}"));
 }
 
-/// ctrl+t only locks. It never unlocks; ctrl+alt+m/s select another mode.
+/// ctrl+shift+alt+t toggles between Pinned and Move from any state.
 pub unsafe fn toggle_pin(hwnd: HWND) {
     set_mode(hwnd, transition(state(hwnd).mode, Event::PinHotkey));
 }
@@ -529,7 +569,7 @@ unsafe fn nudge(hwnd: HWND, dx: i32, dy: i32) {
     if GetWindowRect(hwnd, &mut r).is_err() {
         return;
     }
-    let work = monitor_work_area(hwnd);
+    let work = monitor_bounds(hwnd);
     let w = r.right - r.left;
     let h = r.bottom - r.top;
     let l = (r.left + dx).clamp(work.l, work.r - w);
@@ -552,7 +592,7 @@ unsafe fn resize_from_key(hwnd: HWND, edge: Edge, delta: i32) {
     if GetWindowRect(hwnd, &mut r).is_err() {
         return;
     }
-    let rect = resize_edge(rect_of(r), monitor_work_area(hwnd), edge, delta);
+    let rect = resize_edge(rect_of(r), monitor_bounds(hwnd), edge, delta);
     let _ = SetWindowPos(
         hwnd,
         None,
@@ -626,12 +666,17 @@ unsafe fn set_edge_cursor(code: isize) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Shell_NotifyIconW sends this straight to the window procedure; it does
+    // not pass through the main GetMessage loop.
+    if msg == crate::tray::WM_TRAY {
+        crate::tray::handle(hwnd, lparam);
+        return LRESULT(0);
+    }
     match msg {
         WM_DESTROY => {
             drop(Box::from_raw(
                 GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FrameState
             ));
-            PostQuitMessage(0);
             LRESULT(0)
         }
         WM_NCHITTEST => {
@@ -692,14 +737,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let Some(drag) = state(hwnd).mouse_drag else {
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             };
-            let mut pt = POINT {
-                x: (lparam.0 & 0xFFFF) as u16 as i32,
-                y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i32,
-            };
-            let _ = ClientToScreen(hwnd, &mut pt);
+            // Captured client coordinates move with the window; using them
+            // feeds the resize back into the next delta.
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_err() {
+                return LRESULT(0);
+            }
             let rect = resize_drag(
                 drag.start,
-                monitor_work_area(hwnd),
+                monitor_bounds(hwnd),
                 drag.horizontal,
                 drag.vertical,
                 pt.x - drag.pointer.x,
@@ -714,6 +760,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 rect.h(),
                 SWP_NOACTIVATE | SWP_NOZORDER,
             );
+            redraw_now(hwnd);
             LRESULT(0)
         }
         WM_LBUTTONUP => {
@@ -768,7 +815,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 wp.cy
             }
             .max(16);
-            let work = monitor_work_area(hwnd);
+            let work = monitor_bounds(hwnd);
             if (wp.flags & SWP_NOMOVE).0 == 0 {
                 wp.x = wp.x.clamp(work.l, (work.r - w).max(work.l));
                 wp.y = wp.y.clamp(work.t, (work.b - h).max(work.t));
@@ -968,7 +1015,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             set_ocr_running(hwnd, false);
             match outcome.words {
                 Ok(words) if !words.is_empty() => {
-                    if let Err(e) = crate::mask::show(hwnd, outcome.rect, words) {
+                    if let Err(e) = crate::mask::show(hwnd, outcome.rect, words, outcome.snapshot) {
                         logline(&format!("mask failed: {e:#}"));
                     }
                 }
@@ -1042,7 +1089,7 @@ unsafe fn apply_spec(hwnd: HWND, text: &str) {
                 let _ = GetWindowRect(hwnd, &mut r);
                 rect_of(r)
             };
-            let rect = apply_size(spec, cur, monitor_work_area(hwnd));
+            let rect = apply_size(spec, cur, monitor_bounds(hwnd));
             let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
@@ -1098,7 +1145,7 @@ unsafe fn apply_tune(hwnd: HWND) {
         return;
     }
     let cur = rect_of(r);
-    let work = monitor_work_area(hwnd);
+    let work = monitor_bounds(hwnd);
     let cx = (cur.l + cur.r) / 2;
     let cy = (cur.t + cur.b) / 2;
     let (v, limit) = match field {
@@ -1194,7 +1241,7 @@ unsafe fn tune_limit(hwnd: HWND, field: TuneField) -> i32 {
     if GetWindowRect(hwnd, &mut r).is_err() {
         return 0;
     }
-    let work = monitor_work_area(hwnd);
+    let work = monitor_bounds(hwnd);
     let (d1, d2) = match field {
         TuneField::W => (
             (r.left + r.right) / 2 - work.l,
@@ -1650,7 +1697,7 @@ unsafe fn status_pos(hwnd: HWND) -> Option<RECT> {
     if GetWindowRect(hwnd, &mut r).is_err() {
         return None;
     }
-    let work = monitor_work_area(hwnd);
+    let work = monitor_bounds(hwnd);
     if work.b - r.bottom >= STRIP_H + STRIP_GAP {
         Some(RECT {
             left: r.left,
@@ -1742,6 +1789,13 @@ unsafe fn paint_status(hwnd: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_stays_on_its_virtual_desktop() {
+        assert_eq!(FRAME_EX_STYLE.0 & WS_EX_TOOLWINDOW.0, 0);
+        assert_ne!(FRAME_EX_STYLE.0 & WS_EX_NOACTIVATE.0, 0);
+        assert_ne!(FRAME_EX_STYLE.0 & WS_EX_APPWINDOW.0, 0);
+    }
 
     const WORK: Rect = Rect {
         l: 0,

@@ -7,6 +7,7 @@
 width     = 800   # default frame width, px (16..=20000)
 height    = 600   # default frame height, px (16..=20000)
 show_hint = true  # resize status strip (input left, current size right)
+work_area = true  # true = keep out of the taskbar; false = use the full monitor
 # font = "Cascadia Mono"  # status font (default Consolas; monospace recommended)
 
 [ocr]
@@ -35,12 +36,12 @@ size = 10
 
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
 # NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows
-# defaults, but `pin = "ctrl+t"` shadows the browser new-tab combo while
-# dt-ocr is running — rebind if that bites.
+# defaults, but `pin` uses a three-modifier combo so plain Ctrl+T still reaches
+# the foreground app — rebind if that bites.
 [bindings]
 draw    = "ctrl+alt+d"   # drag a rect on screen to place the frame (Esc cancels)
 resize  = "ctrl+alt+s"   # enter/reset resize; unlocks pin; i=input, w/h=tune
-pin     = "ctrl+t"       # lock only (blue, click-through); never unlocks
+pin     = "ctrl+shift+alt+t" # toggle Pin (blue, click-through) / Move (cyan)
 capture = "ctrl+enter"   # copy the pixels under the frame; never changes mode
 move    = "ctrl+alt+m"   # Move mode (cyan); unlocks pin
 toggle  = "win+shift+o"  # show/hide the OCR layer (Win+O is reserved by Windows)

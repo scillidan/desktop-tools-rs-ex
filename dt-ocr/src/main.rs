@@ -8,13 +8,16 @@
 
 mod capture;
 mod config;
+mod desktops;
 mod frame;
 mod hotkeys;
+mod icon;
 mod interaction;
 mod mask;
 mod ocr;
 mod overlay;
 mod text;
+mod tray;
 
 use anyhow::Result;
 use std::io::Write;
@@ -57,9 +60,13 @@ fn set_dpi_aware() {
 
 fn run() -> Result<()> {
     set_dpi_aware();
+    unsafe {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+    }
     let cfg_path = dt_common::config::exe_dir_file(config::CONFIG_NAME)?;
     let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
-    let cfg = config::parse(&text)?;
+    let mut cfg = config::parse(&text)?;
     mask::set_fill(cfg.mask_fill);
     mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
     logline(&format!(
@@ -69,17 +76,15 @@ fn run() -> Result<()> {
         cfg.frame_h
     ));
 
-    let frame = unsafe {
-        frame::create(
-            cfg.frame_w,
-            cfg.frame_h,
-            cfg.show_hint,
-            cfg.font.clone(),
-            cfg.ocr_scale,
-            cfg.ocr_language.clone(),
-        )?
+    let mut frames = desktops::Frames::new(&cfg)?;
+    let frame = frames.all()[0];
+    let _tray = match tray::Tray::new(frame) {
+        Ok(tray) => Some(tray),
+        Err(e) => {
+            logline(&format!("warn: tray unavailable: {e:#}"));
+            None
+        }
     };
-    FRAME_HWND.store(frame.0 as isize, std::sync::atomic::Ordering::SeqCst);
 
     let mut hotkeys = register_hotkeys(frame, &cfg);
     let mut mtime = dt_common::config::modified(&cfg_path);
@@ -101,7 +106,10 @@ fn run() -> Result<()> {
         if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY {
             if let Some(action) = hotkeys.action_of(msg.wParam.0 as i32) {
                 logline(&format!("hotkey: {action:?}"));
-                dispatch(action, frame);
+                match frames.current(&cfg) {
+                    Ok(current) => dispatch(action, current),
+                    Err(e) => logline(&format!("warn: cannot select desktop frame: {e:#}")),
+                }
             }
         }
         if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_TIMER && msg.wParam.0 == 1 {
@@ -113,21 +121,25 @@ fn run() -> Result<()> {
                         logline("config reloaded, hotkeys re-registered");
                         hotkeys.unregister_all(frame);
                         hotkeys = register_hotkeys(frame, &new_cfg);
-                        unsafe {
-                            frame::set_prefs(
-                                frame,
-                                new_cfg.show_hint,
-                                new_cfg.font.clone(),
-                                new_cfg.ocr_scale,
-                                new_cfg.ocr_language.clone(),
-                            )
-                        };
+                        for &current in frames.all() {
+                            unsafe {
+                                frame::set_prefs(
+                                    current,
+                                    new_cfg.work_area,
+                                    new_cfg.show_hint,
+                                    new_cfg.font.clone(),
+                                    new_cfg.ocr_scale,
+                                    new_cfg.ocr_language.clone(),
+                                )
+                            };
+                        }
                         mask::set_fill(new_cfg.mask_fill);
                         mask::set_style(
                             new_cfg.mask_font.clone(),
                             new_cfg.mask_size,
                             new_cfg.mask_layout,
                         );
+                        cfg = new_cfg;
                     }
                     Err(e) => logline(&format!("config reload failed, keeping old: {e:#}")),
                 }
@@ -139,6 +151,7 @@ fn run() -> Result<()> {
         }
     }
     hotkeys.unregister_all(frame);
+    unsafe { windows::Win32::System::Com::CoUninitialize() };
     logline("message loop exited");
     Ok(())
 }
@@ -194,6 +207,10 @@ static FRAME_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsi
 
 pub fn frame_hwnd() -> HWND {
     HWND(FRAME_HWND.load(std::sync::atomic::Ordering::SeqCst) as *mut core::ffi::c_void)
+}
+
+fn set_frame_hwnd(hwnd: HWND) {
+    FRAME_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Append-only log next to the exe (release builds have no console).

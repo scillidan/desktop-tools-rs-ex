@@ -36,9 +36,17 @@ pub struct Word {
     pub line: u32,
 }
 
+pub struct Snapshot {
+    pub width: i32,
+    pub height: i32,
+    /// Native-resolution, top-down BGRA pixels of the whole frame.
+    pub bgra: Vec<u8>,
+}
+
 pub struct Outcome {
     /// The frame rect the words belong to (the mask window's screen rect).
     pub rect: Rect,
+    pub snapshot: Snapshot,
     pub words: Result<Vec<Word>>,
 }
 
@@ -70,7 +78,7 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
         crate::frame::ocr_scale(frame),
         max,
     );
-    let (w, h, pixels) = capture_bgra(capture, scale)?;
+    let (w, h, pixels, snapshot) = capture_bgra(rect, scale)?;
     crate::frame::set_ocr_running(frame, true);
     logline(&format!(
         "ocr: capture {w}x{h} (scale {scale}, max {max}px) at ({},{})",
@@ -97,7 +105,11 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
             }
             words
         });
-        let outcome = Box::into_raw(Box::new(Outcome { rect, words }));
+        let outcome = Box::into_raw(Box::new(Outcome {
+            rect,
+            snapshot,
+            words,
+        }));
         let frame = HWND(frame_addr as *mut core::ffi::c_void);
         if PostMessageW(
             Some(frame),
@@ -129,20 +141,29 @@ fn choose_scale(w: i32, h: i32, requested: u32, max: u32) -> u32 {
     scale
 }
 
-/// Screen pixels of `rect` as top-down BGRA, upscaled by `scale` with GDI's
-/// halftone stretch (area averaging: keeps small text legible where nearest
-/// neighbour turns it to blocky noise). The layout SoftwareBitmap expects
-/// top-down rows; GDI DIBs default to bottom-up, hence the negative height.
-unsafe fn capture_bgra(rect: Rect, scale: u32) -> Result<(i32, i32, Vec<u8>)> {
-    let (sw, sh) = (rect.w(), rect.h());
+/// Capture the whole frame at native resolution for the frozen mask base;
+/// upscale only the inset content for OCR with GDI's halftone stretch. Both
+/// DIBs are top-down, as SoftwareBitmap and the layered mask expect.
+unsafe fn capture_bgra(rect: Rect, scale: u32) -> Result<(i32, i32, Vec<u8>, Snapshot)> {
+    let (sw, sh) = (rect.w() - BORDER * 2, rect.h() - BORDER * 2);
     let (w, h) = (sw * scale as i32, sh * scale as i32);
     let screen = GetDC(None);
     ensure!(!screen.0.is_null(), "GetDC(screen) failed");
 
     let src_mem = CreateCompatibleDC(Some(screen));
-    let (src_bmp, _src_bits) = make_dib(screen, sw, sh)?;
+    let (src_bmp, src_bits) = make_dib(screen, rect.w(), rect.h())?;
     let old_src = SelectObject(src_mem, src_bmp.into());
-    let blt = BitBlt(src_mem, 0, 0, sw, sh, Some(screen), rect.l, rect.t, SRCCOPY);
+    let blt = BitBlt(
+        src_mem,
+        0,
+        0,
+        rect.w(),
+        rect.h(),
+        Some(screen),
+        rect.l,
+        rect.t,
+        SRCCOPY,
+    );
 
     let dst_mem = CreateCompatibleDC(Some(screen));
     let (dst_bmp, dst_bits) = make_dib(screen, w, h)?;
@@ -150,12 +171,38 @@ unsafe fn capture_bgra(rect: Rect, scale: u32) -> Result<(i32, i32, Vec<u8>)> {
     let _ = SetStretchBltMode(dst_mem, HALFTONE);
     let _ = SetBrushOrgEx(dst_mem, 0, 0, None);
     let stretched = blt.is_ok()
-        && StretchBlt(dst_mem, 0, 0, w, h, Some(src_mem), 0, 0, sw, sh, SRCCOPY).as_bool();
+        && StretchBlt(
+            dst_mem,
+            0,
+            0,
+            w,
+            h,
+            Some(src_mem),
+            BORDER,
+            BORDER,
+            sw,
+            sh,
+            SRCCOPY,
+        )
+        .as_bool();
     let pixels = if stretched && !dst_bits.is_null() {
         Some(
             std::slice::from_raw_parts(dst_bits as *const u8, (w as usize) * (h as usize) * 4)
                 .to_vec(),
         )
+    } else {
+        None
+    };
+    let snapshot = if blt.is_ok() && !src_bits.is_null() {
+        Some(Snapshot {
+            width: rect.w(),
+            height: rect.h(),
+            bgra: std::slice::from_raw_parts(
+                src_bits as *const u8,
+                (rect.w() as usize) * (rect.h() as usize) * 4,
+            )
+            .to_vec(),
+        })
     } else {
         None
     };
@@ -168,7 +215,8 @@ unsafe fn capture_bgra(rect: Rect, scale: u32) -> Result<(i32, i32, Vec<u8>)> {
     let _ = DeleteDC(src_mem);
     let _ = ReleaseDC(None, screen);
     let pixels = pixels.context("BitBlt/StretchBlt failed")?;
-    Ok((w, h, pixels))
+    let snapshot = snapshot.context("snapshot BitBlt failed")?;
+    Ok((w, h, pixels, snapshot))
 }
 
 /// A top-down 32-bit DIB section plus its raw pixel pointer.

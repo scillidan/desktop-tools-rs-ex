@@ -38,12 +38,18 @@ pub enum Edge {
     Down,
 }
 
-/// The complete mode transition table. Commands are absolute: global mode
-/// hotkeys work from every state, and pin is deliberately not a toggle.
+/// The complete mode transition table. Move/resize are absolute commands;
+/// Pin toggles between Pinned and Move from every state.
 pub fn transition(mode: Mode, event: Event) -> Mode {
     match event {
         Event::MoveHotkey => Mode::Move,
-        Event::PinHotkey => Mode::Pinned,
+        Event::PinHotkey => {
+            if mode == Mode::Pinned {
+                Mode::Move
+            } else {
+                Mode::Pinned
+            }
+        }
         Event::ResizeHotkey { first_entry } => {
             if mode.is_resize() {
                 Mode::Input

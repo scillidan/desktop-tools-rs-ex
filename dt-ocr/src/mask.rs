@@ -1,18 +1,16 @@
 //! P0.3 overlay mask: one topmost layered window over the frame region,
-//! rendered per-pixel through `UpdateLayeredWindow` so the gaps show the live
-//! screen while each OCR word gets an opaque black backing box that hides the
-//! original glyphs. Click a word → clipboard gets that word; press-drag a
-//! rectangle → clipboard gets the selected words joined into a paragraph.
-//! Esc or right-click dismisses.
+//! rendered per-pixel through `UpdateLayeredWindow`. Untouched pixels come
+//! from the native-resolution snapshot captured with the OCR image, so screen
+//! changes cannot misalign the mask. OCR words get black backing boxes and
+//! white glyphs. Click copies a word; drag copies a selection; Esc dismisses.
 //!
-//! Every pixel carries alpha ≥ 1 even where nothing is drawn: an alpha-0
-//! layered pixel passes mouse input through, and the mask must own the whole
-//! frame region (PLAN: click-through only *while* OCR runs).
+//! Every pixel is opaque: transparent layered pixels pass mouse input through,
+//! while the mask must own the frame region after OCR.
 
 use crate::capture::copy_text;
 use crate::config::{MaskFill, MaskLayout, MaskSize};
 use crate::logline;
-use crate::ocr::Word;
+use crate::ocr::{Snapshot, Word};
 use crate::text::join_words;
 use anyhow::{ensure, Context, Result};
 use dt_common::layout::Rect;
@@ -28,8 +26,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Black at alpha 1/255: invisible over any content, but hit-testable.
-const BG_ALPHA: u32 = 0x0100_0000;
 const BOX_ALPHA: u32 = 0xFF00_0000;
 const TEXT_WHITE: u32 = 0x00FF_FFFF;
 const SELECT_YELLOW: u32 = 0x0000D2FF; // RGB(255, 210, 0)
@@ -151,10 +147,18 @@ pub unsafe fn dismiss() {
 
 /// Builds and shows the mask for `words`, which are already in coordinates
 /// relative to `rect` (the frame's screen rect).
-pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>) -> Result<()> {
+pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapshot) -> Result<()> {
     dismiss();
     ensure!(rect.has_area(), "mask rect has no area");
     ensure!(!words.is_empty(), "mask has no words");
+    ensure!(
+        snapshot.width == rect.w() && snapshot.height == rect.h(),
+        "snapshot dimensions do not match mask"
+    );
+    ensure!(
+        snapshot.bgra.len() == (rect.w() as usize) * (rect.h() as usize) * 4,
+        "snapshot buffer has the wrong size"
+    );
 
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
     let class = w!("dt-ocr.mask");
@@ -197,7 +201,10 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>) -> Result<()> {
     let old_bitmap = SelectObject(memdc, bitmap.into());
     let bits = bits as *mut u32;
     let len = (w * h) as usize;
-    std::ptr::write_bytes(bits as *mut u8, 0, len * 4);
+    std::ptr::copy_nonoverlapping(snapshot.bgra.as_ptr(), bits as *mut u8, len * 4);
+    for i in 0..len {
+        *bits.add(i) |= BOX_ALPHA;
+    }
     let style = style();
     let dpi = match GetDpiForWindow(parent) {
         0 => 96,
@@ -441,9 +448,8 @@ unsafe fn font_for(face: &[u16], em: i32, fonts: &mut Vec<(i32, HFONT)>) -> HFON
 }
 
 /// Draws the mask base once. Overlay: black boxes/bands plus white text at the
-/// OCR positions. Reader: an opaque black page with the reflowed text. Then
-/// resolves the alpha channel: drawn pixels opaque, everything else the
-/// invisible-but-solid background alpha.
+/// OCR positions. Reader: an opaque black page with the reflowed text.
+/// Finally, makes every pixel opaque so the frozen base stays visible.
 unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word], base: &Base) {
     let _ = SetBkMode(hdc, TRANSPARENT);
     let _ = SetTextColor(hdc, COLORREF(TEXT_WHITE));
@@ -548,14 +554,7 @@ unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word], ba
         let _ = DeleteObject(font.into());
     }
     for i in 0..(w * h) as usize {
-        let p = *bits.add(i);
-        *bits.add(i) = if p & 0x00FF_FFFF != 0 {
-            p | BOX_ALPHA
-        } else if p >> 24 == 0 {
-            BG_ALPHA
-        } else {
-            p
-        };
+        *bits.add(i) |= BOX_ALPHA;
     }
 }
 

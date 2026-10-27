@@ -47,9 +47,12 @@ paste the template again with the next phase.
 | Phase | Decision | Why |
 |---|---|---|
 | P0.1 | Workspace shape: `dt-common` + `dt-ocr` crates | Tools share config/keys/tray; recording/scaling arrive later as own crates |
+| P0.2 | Captured edge drags use `GetCursorPos` and repaint each step | `WM_MOUSEMOVE` client coordinates move with the frame; using them as screen deltas collapsed the frame to 16 px and made corners unusable |
+| P0.2 | Work-area bounds default on; full monitor is `[frame] work_area = false` | Follow the Windows default (exclude taskbar), with one hot-reloadable override shared by all sizing paths |
+| P0.2 | One process, one `WS_EX_APPWINDOW` frame per virtual desktop; current-desktop hotkeys create/reuse it; native tray uses exe icon resource 1 | A Shell application view is required for desktop isolation; per-process hotkeys avoid conflicts, and a native Quit tray avoids a large dependency |
 | P0.3 | Overlay is one layered window with per-word hit-testing (Text-Grab model), click-through only while OCR runs | Spec requirement: no blocking during processing; blocking only after render |
 | P0.3 | Interim engine = `Windows.Media.Ocr` (zh-Hans-CN first, then en) | Word boxes with zero provisioning let the overlay be verified before P0.4; P0.4 swaps the provider behind `ocr::Word` |
-| P0.3 | Mask gaps use alpha 1, not 0 | Layered alpha-0 pixels pass mouse input through; the mask must own the whole frame region after render |
+| P0.3 | Mask base = native BGRA snapshot from the OCR capture | Frozen source pixels keep boxes aligned after scrolling and avoid the former alpha-1 veil; all layered pixels stay opaque and hit-testable |
 | P0.3 | OCR captures are upscaled 4x with GDI halftone before recognition | Native-resolution Windows OCR turns 8-10 pt screen text into noise; 4x fixed digits and CJK. Clamped by `MaxImageDimension` + a 16 Mpx budget |
 | P0.3 | Auto language = zh pass + en pass merged per line | The zh model mangles long Latin runs, the en model drops CJK; merge keeps ≥20%-CJK lines on zh and takes en for Latin lines |
 | P0.3 | Mask fill = continuous band per OCR line segment (`[mask] fill = "lines"`, default) | "Connected text" look without reflow: glyphs keep OCR positions, so spacing is exact by construction and word hit-testing stays aligned; gaps > 3/4 em (tabs/columns) stay separate |
@@ -60,6 +63,7 @@ paste the template again with the next phase.
 | P0.3 | `layout = "reader"`: opaque page, reflowed text, paragraph gaps, click copies all | A readable mode separate from the position-faithful overlay |
 | P0.4 | RapidOCR measured (AHK-ScreenOCR CLI): 4/4 lines at native res, ~1.6 s/run, line boxes only | Best quality by far; needs a persistent worker for latency and a word-splitting plan to keep word-level clicks |
 | P0.4 | `auto` engine = language-table routing; explicit keys force engine | Answers the user's multi-engine interaction question with the smallest rule set; revisit after real use |
+| P0.6 | Tag releases and Scoop manifests use desktop-tools-rs-ex naming; the ex hash stays empty until its first release | Release assets and manifest autoupdate must agree; do not claim an unreleased package is installable |
 | P1.3 | pending | choose at phase start: wrap wcap.exe vs own DDA capture |
 | P1.4 | pending | Magpie is D3D11+shader heavy; v1 may be simple ratio stretch |
 

@@ -18,7 +18,7 @@ only the PowerShell verification harnesses used to live outside it (see §6.3).
 >
 > Current state: P0.1–P0.3 are done, including the overlay mask, OCR quality
 > work and the mask reader mode (details below). Before changing anything:
-> 1. `cargo test` (expect 63 passing) and `cargo clippy --all-targets`.
+> 1. `cargo test` (expect 67 passing) and `cargo clippy --all-targets`.
 > 2. Rebuild/relaunch with the script from §6.1, then run the freshness check
 >    from §6.2.
 > 3. Recreate the harnesses in §6.3 if `%USERPROFILE%\.temp\opencode\*.ps1`
@@ -116,8 +116,8 @@ live next to the exe: `target\release\dt-ocr.toml` and `dt-ocr.log`.
 4. `RegisterHotKey` on this machine: **Win+O is reserved (error 1409)**; the
    toggle is `win+shift+o`. Register against the frame HWND (attribution).
 5. Layered windows: alpha 0 pixels are click-through even with per-pixel
-   alpha. The mask paints gaps at alpha 1 (`0x01000000`) so the region stays
-   hit-testable.
+   alpha. The mask uses the capture's native BGRA snapshot as its base and
+   makes every pixel opaque, so the region stays hit-testable and frozen.
 6. Windows OCR is unusable at native resolution on 8–10 pt text
    (`The qu1Ck 0r0 n fOX`). It runs at 4× (GDI halftone), clamped by
    `OcrEngine.MaxImageDimension` (10000 here) and a 16 Mpx budget.
@@ -201,8 +201,8 @@ under the frame at (911,420) 800×600 (the default frame position).
 - post capture (WM_HOTKEY 4); poll the frame exstyle for `WS_EX_TRANSPARENT`
   while OCR runs (busy loop, ~150 ms window);
 - wait for `dt-ocr.mask`; check `WindowFromPoint` in a gap and outside the
-  frame; screenshot: word box black, glyph pixels light, inter-line gap live,
-  line band continuous past the first word;
+  frame; screenshot: word box black, glyph pixels light, gap frozen, line band
+  continuous past the first word; changing the source must not change the mask;
 - posted click → clipboard = first word; posted drag across both lines →
   `Quick brown\n你好世界`;
 - WM_HOTKEY 6 twice → mask hidden/shown with the same HWND (no re-OCR);
@@ -223,10 +223,9 @@ Sarasa Term SC Nerd+13px ...`.
 
 ## 7. Open work (ask before starting)
 
-1. **Frozen snapshot base** (recommended earlier, not implemented): reuse the
-   OCR BGRA as the mask background instead of the live screen; removes the
-   alpha-1 veil and keeps boxes aligned even if the screen scrolls. Needs a
-   `snapshot` field on `Outcome` and a mask base change.
+1. **Frozen snapshot base** (implemented 2026-10-27): `Outcome` carries the
+   native full-frame BGRA capture; OCR uses an upscale of its inset, and the
+   mask composites over the frozen pixels. Physical verification pending.
 2. **Token-range selection** (not implemented): replace rectangle intersection
    with anchor→head token ranges; shift/ctrl extend, double-click a paragraph,
    ctrl+A; keep the current per-line copy rules.
@@ -240,7 +239,7 @@ Sarasa Term SC Nerd+13px ...`.
 
 ## 8. Handoff checklist for every change
 
-- `cargo fmt`, `cargo test` (currently 63), `cargo clippy --all-targets`.
+- `cargo fmt`, `cargo test` (currently 67 passing, 1 ignored), `cargo clippy --all-targets`.
 - Rebuild/relaunch with §6.1 (release, CIM launch, probe).
 - §6.2 freshness check: exe newer than all sources.
 - Update `CHECKLIST.md` (mechanical + physical items), `AGENTS.md` status,

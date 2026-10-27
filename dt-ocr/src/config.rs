@@ -11,6 +11,8 @@ pub const CONFIG_NAME: &str = "dt-ocr.toml";
 pub struct Config {
     pub frame_w: i32,
     pub frame_h: i32,
+    /// Constrain the frame to the monitor work area, excluding the taskbar.
+    pub work_area: bool,
     /// Show the format hint on the spec-mode command bar (default true).
     pub show_hint: bool,
     /// Status-line font face (default Consolas); any installed GDI face
@@ -106,7 +108,7 @@ impl Action {
         match self {
             Action::Draw => "ctrl+alt+d".parse().unwrap(),
             Action::Resize => "ctrl+alt+s".parse().unwrap(),
-            Action::Pin => "ctrl+t".parse().unwrap(),
+            Action::Pin => "ctrl+shift+alt+t".parse().unwrap(),
             Action::Capture => "ctrl+enter".parse().unwrap(),
             Action::Move => "ctrl+alt+m".parse().unwrap(),
             // Win+O is reserved by Windows (orientation lock; RegisterHotKey
@@ -158,6 +160,7 @@ impl Default for Config {
         Config {
             frame_w: 800,
             frame_h: 600,
+            work_area: true,
             show_hint: true,
             font: None,
             ocr_scale: 4,
@@ -196,6 +199,12 @@ pub fn parse(text: &str) -> Result<Config> {
                             "warn: frame.height must be 16..=20000; using {}",
                             cfg.frame_h
                         ),
+                    }
+                }
+                if let Some(v) = t.get("work_area") {
+                    match v.as_bool() {
+                        Some(b) => cfg.work_area = b,
+                        None => eprintln!("warn: frame.work_area must be true/false; using true"),
                     }
                 }
                 if let Some(v) = t.get("show_hint") {
@@ -316,6 +325,7 @@ mod tests {
             Config {
                 frame_w: 800,
                 frame_h: 600,
+                work_area: true,
                 show_hint: true,
                 font: None,
                 ocr_scale: 4,
@@ -340,6 +350,12 @@ mod tests {
         assert_eq!((cfg.frame_w, cfg.frame_h), (800, 600));
         let cfg = parse("[frame]\nwidth = \"wide\"\nheight = 1024\n").unwrap();
         assert_eq!((cfg.frame_w, cfg.frame_h), (800, 1024));
+    }
+
+    #[test]
+    fn work_area_parses_and_bad_value_keeps_taskbar_exclusion() {
+        assert!(!parse("[frame]\nwork_area = false\n").unwrap().work_area);
+        assert!(parse("[frame]\nwork_area = 3\n").unwrap().work_area);
     }
 
     #[test]

@@ -63,14 +63,15 @@ window scaling. Same user, same machine, same conventions.
 
 - `dt-common` — keys/layout/config primitives copied from desktop-tools-rs
   (repo folder `window-tools-rs`) with provenance comments; shared by all tools
-- `dt-ocr` — OCR frame window, overlay mask, drag-select OCR, engines
+- `dt-ocr` — OCR frame window, overlay mask, drag-select OCR, engines; native
+  Quit tray and procedural exe/tray icon (`icon.rs`, `build.rs`)
 - `dt-rec` (future) — recording (wcap model)
 - `dt-scale` (future) — window scaling (Magpie model)
 
 P0.1 status: workspace + dt-common (`keys`, `layout`, `config` exe-relative
 helpers) + dt-ocr (empty window, `dt-ocr.toml` next to exe, `dt-ocr.log`).
-kbdhook/tray pipeline intentionally NOT copied yet — they land with the P0.2
-hotkeys/tray.
+The kbdhook pipeline is intentionally NOT copied yet; P0.2 owns the hotkeys
+and a minimal native tray.
 
 P0.2 status: dt-ocr frame window complete. `interaction.rs` is the tested,
 explicit five-state model: Move (cyan), Pinned (blue), and yellow resize
@@ -81,15 +82,25 @@ and focus the frame. From outside resize, the first ctrl+alt+s lands on
 Tune(width), later ones on Drag; inside resize it resets Input. Esc:
 Input→Drag, Drag/Tune→Move; any defocus exits resize to Move. Capture never
 changes mode. Move drags by its interior/arrows/hjkl; a border press from
-Move/Input/Tune enters Drag and the same captured client-mouse drag resizes
-(no WS_THICKFRAME or NC sizing dependence). Drag arrows move their matching
-edge (Shift inward, Ctrl ±5); `i`→Input, `w`/`h`→Tune. Tune digits/arrows
-keep the 250 ms geometry debounce. The 2 px border has exactly one mode
-color; release forces UpdateWindow so readouts cannot remain stale.
+Move/Input/Tune enters Drag and the same captured mouse drag resizes
+(no WS_THICKFRAME or NC sizing dependence). Mouse geometry uses GetCursorPos:
+WM_MOUSEMOVE client coordinates move with the frame and fed resize deltas
+back into themselves, collapsing the frame to 16 px. Every drag step repaints
+synchronously. Drag arrows move their matching edge (Shift inward, Ctrl ±5);
+`i`→Input, `w`/`h`→Tune. Tune digits/arrows keep the 250 ms geometry debounce.
+The 2 px border has exactly one mode color.
 The status strip is display-only (below/above/inside fallback), Consolas or
 `frame.font`, inverse-video SizeSpec input with a block caret; readout tune
 is keyboard-entered, not clicked. SizeSpec uses per-axis DimSpec against the
-current monitor work area. `overlay.rs` = red draw band; `capture.rs` = GDI
+configured monitor bounds. `[frame] work_area` defaults true (exclude the
+taskbar); false uses the full monitor and hot-reloads. The frame needs
+WS_EX_APPWINDOW (and no WS_EX_TOOLWINDOW): without a shell application view,
+GetWindowDesktopId fails and it follows every desktop. `desktops.rs` keeps one
+frame per desktop, creates/reuses it on the current desktop's global hotkey,
+and merges duplicates after a desktop closes. `tray.rs` uses
+Shell_NotifyIconW with exe icon resource 1 and a right-click Quit menu; the
+shell callback is handled in frame::wndproc, not the GetMessage loop.
+`overlay.rs` = red draw band; `capture.rs` = GDI
 → clipboard CF_DIB + CF_BITMAP; `hotkeys.rs` = RegisterHotKey with the
 ported vk map. `~\.temp\opencode\frame_state_test.ps1` verifies background
 mode commands, Pin/Esc/defocus and real border geometry (mouse_event drag;
@@ -99,9 +110,10 @@ P0.3 status: overlay mask complete. Capture keeps the image capture and starts
 Windows.Media.Ocr on a worker thread (`ocr.rs`: top-down BGRA capture →
 SoftwareBitmap → word boxes; zh-Hans-CN engine first, then en), the frame is
 click-through while it runs, and `mask.rs` shows a topmost per-pixel-alpha
-layered window over the frame: a black backing box per word with the text
-re-rendered white (Microsoft YaHei), gaps at alpha 1 so every pixel stays
-hit-testable (alpha 0 would be click-through). Click = that word on the
+layered window over the frame: a frozen native-resolution BGRA snapshot as
+the base, a black backing box per word with the text re-rendered white. Every
+pixel is opaque, so the mask stays hit-testable and source scrolling cannot
+misalign it. Click = that word on the
 clipboard; press-drag rectangle = `text::join_words` paragraph (space between
 Latin words, none inside CJK); Esc/right-click dismiss. `mask_test.ps1` drives
 the whole cycle mechanically (known Latin+CJK window, posted
