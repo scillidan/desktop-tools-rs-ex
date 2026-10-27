@@ -43,6 +43,10 @@ pub struct FrameState {
     /// OCR worker running: the frame is click-through until it finishes
     /// (PLAN P0.3 — nothing under the frame is blocked during recognition).
     pub ocr_running: bool,
+    /// Upscale factor for the next OCR capture (`[ocr] scale`).
+    pub ocr_scale: u32,
+    /// Requested recognizer language (`[ocr] language`); None = auto.
+    pub ocr_language: Option<String>,
     /// Type-ahead buffer used by the Input state.
     pub spec: String,
     /// Show the resize status strip (`frame.show_hint`).
@@ -184,7 +188,14 @@ pub fn work_area() -> Rect {
     })
 }
 
-pub unsafe fn create(w: i32, h: i32, show_hint: bool, font: Option<String>) -> Result<HWND> {
+pub unsafe fn create(
+    w: i32,
+    h: i32,
+    show_hint: bool,
+    font: Option<String>,
+    ocr_scale: u32,
+    ocr_language: Option<String>,
+) -> Result<HWND> {
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
     let class = w!("dt-ocr.frame");
     let wc = WNDCLASSW {
@@ -273,6 +284,8 @@ pub unsafe fn create(w: i32, h: i32, show_hint: bool, font: Option<String>) -> R
             spec: String::new(),
             show_hint,
             font_face: font.unwrap_or_else(|| "Consolas".to_string()),
+            ocr_scale,
+            ocr_language,
             status,
             inside: false,
             cursor_on: false,
@@ -305,8 +318,14 @@ unsafe fn state_opt(hwnd: HWND) -> Option<&'static mut FrameState> {
     Some(&mut *(p as *mut FrameState))
 }
 
-/// Live-update the status-strip prefs (config hot-reload).
-pub unsafe fn set_prefs(hwnd: HWND, show: bool, font: Option<String>) {
+/// Live-update the status-strip prefs and the OCR scale (config hot-reload).
+pub unsafe fn set_prefs(
+    hwnd: HWND,
+    show: bool,
+    font: Option<String>,
+    ocr_scale: u32,
+    ocr_language: Option<String>,
+) {
     let s = state(hwnd);
     let font = font.unwrap_or_else(|| "Consolas".to_string());
     if s.show_hint != show || s.font_face != font {
@@ -318,6 +337,18 @@ pub unsafe fn set_prefs(hwnd: HWND, show: bool, font: Option<String>) {
             let _ = InvalidateRect(Some(st), None, false);
         }
     }
+    s.ocr_scale = ocr_scale.clamp(1, 4);
+    s.ocr_language = ocr_language;
+}
+
+/// Configured OCR upscale factor (read when a capture starts).
+pub unsafe fn ocr_scale(hwnd: HWND) -> u32 {
+    state(hwnd).ocr_scale
+}
+
+/// Requested OCR language tag, `None` = auto.
+pub unsafe fn ocr_language(hwnd: HWND) -> Option<String> {
+    state(hwnd).ocr_language.clone()
 }
 
 /// Enter or reset resize mode from the global hotkey. The command works

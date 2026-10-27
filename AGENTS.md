@@ -107,4 +107,22 @@ Latin words, none inside CJK); Esc/right-click dismiss. `mask_test.ps1` drives
 the whole cycle mechanically (known Latin+CJK window, posted
 hotkey/click/drag/Esc/right-click).
 
+P0.3 OCR quality: captures are upscaled before recognition (`[ocr] scale`,
+default 4; GDI halftone) because native resolution turns 8-10 pt screen text
+into noise. `[ocr] language` defaults to auto: the zh engine runs first, then
+an en pass when Latin is present; `ocr::merge_lines` keeps lines with >=20%
+CJK letters on zh and takes the en line for Latin ones (en drops CJK, zh
+mangles long Latin). Rectangles are divided back by the scale. Measured on
+10 pt Sarasa Mono SC: 4x + merge is near-exact; RapidOCR (AHK-ScreenOCR) is
+exact at native res but ~1.6 s per CLI run and line-level only — that is the
+P0.4 engine decision.
+
+P0.3 mask fill: `[mask] fill = "lines"` (default) paints one continuous black
+band per OCR line segment (word gaps < 3/4 em filled, tabs/columns separate);
+the glyphs keep their OCR positions, so Latin/CJK spacing is exact and word
+hit-testing stays aligned. `"boxes"` restores the per-word look. Selections
+copy with `\n` between OCR lines. The new `toggle` binding (default
+`win+shift+o`; Win+O is reserved by Windows) hides/shows the existing mask
+with the same HWND, no re-OCR.
+
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

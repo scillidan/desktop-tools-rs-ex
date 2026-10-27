@@ -9,6 +9,23 @@ height    = 600   # default frame height, px (16..=20000)
 show_hint = true  # resize status strip (input left, current size right)
 # font = "Cascadia Mono"  # status font (default Consolas; monospace recommended)
 
+[ocr]
+# Upscale the capture before recognition. 1 = native; 2-3 reads smaller,
+# tighter screen fonts much better (same idea as ShareX's "scale factor").
+# Automatically clamped down when the result would exceed the engine limit
+# or the memory budget. Hot-reloads; applies to the next capture.
+scale = 4
+# Recognizer language: "auto" (CJK pack first, then English) or a tag such
+# as "en", "zh". A missing pack falls back to auto with a warning.
+language = "auto"
+
+[mask]
+# OCR result layer: "lines" = one continuous black band per OCR line segment
+# (gaps between words are filled; glyphs stay at their recognised positions,
+# so Latin spaces and CJK spacing are preserved), "boxes" = one box per word.
+# Hot-reloads.
+fill = "lines"
+
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
 # NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows
 # defaults, but `pin = "ctrl+t"` shadows the browser new-tab combo while
@@ -19,6 +36,7 @@ resize  = "ctrl+alt+s"   # enter/reset resize; unlocks pin; i=input, w/h=tune
 pin     = "ctrl+t"       # lock only (blue, click-through); never unlocks
 capture = "ctrl+enter"   # copy the pixels under the frame; never changes mode
 move    = "ctrl+alt+m"   # Move mode (cyan); unlocks pin
+toggle  = "win+shift+o"  # show/hide the OCR layer (Win+O is reserved by Windows)
 
 # resize accepts: 1600x900 (exact), 1600 (width px), x900 (height px),
 # 40%x30% / 1/2x1/3 (independent width/height), 40% or 1/2 (both axes).

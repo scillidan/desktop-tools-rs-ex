@@ -10,11 +10,13 @@
 //! frame region (PLAN: click-through only *while* OCR runs).
 
 use crate::capture::copy_text;
+use crate::config::MaskFill;
 use crate::logline;
 use crate::ocr::Word;
 use crate::text::join_words;
 use anyhow::{ensure, Context, Result};
 use dt_common::layout::Rect;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::w;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -52,6 +54,45 @@ struct MaskState {
 }
 
 static MASK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// `[mask] fill = "lines"`: continuous band per line segment. Off = boxes.
+static FILL_LINES: AtomicBool = AtomicBool::new(true);
+
+/// Live config (`main` calls this at startup and on every hot-reload).
+pub fn set_fill(fill: MaskFill) {
+    FILL_LINES.store(fill == MaskFill::Lines, Ordering::Relaxed);
+}
+
+fn fill_lines() -> bool {
+    FILL_LINES.load(Ordering::Relaxed)
+}
+
+/// Show/hide the open mask without re-running OCR (bound to `toggle`).
+pub unsafe fn toggle() {
+    let hwnd = mask_hwnd();
+    if !IsWindow(Some(hwnd)).as_bool() {
+        logline("mask: toggle ignored (no mask)");
+        return;
+    }
+    if IsWindowVisible(hwnd).as_bool() {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        logline("mask: hidden");
+    } else {
+        present(hwnd);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+        logline("mask: shown");
+    }
+}
 
 fn mask_hwnd() -> HWND {
     HWND(MASK.load(std::sync::atomic::Ordering::Relaxed) as *mut core::ffi::c_void)
@@ -172,6 +213,62 @@ unsafe fn state(hwnd: HWND) -> &'static mut MaskState {
     &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MaskState)
 }
 
+/// Black bands for the continuous fill: within one OCR line, words closer
+/// than 3/4 em are one run; bigger gaps (tabs, columns) stay separate.
+fn line_segments(words: &[Word]) -> Vec<Rect> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < words.len() {
+        let line = words[start].line;
+        let mut end = start;
+        while end < words.len() && words[end].line == line {
+            end += 1;
+        }
+        let mut run: Option<Rect> = None;
+        for w in &words[start..end] {
+            match run {
+                None => run = Some(w.rect),
+                Some(mut r) => {
+                    let h = (w.rect.b - w.rect.t).min(r.h()).max(1);
+                    if w.rect.l - r.r <= h * 3 / 4 {
+                        r.t = r.t.min(w.rect.t);
+                        r.b = r.b.max(w.rect.b);
+                        r.r = r.r.max(w.rect.r);
+                        run = Some(r);
+                    } else {
+                        out.push(r);
+                        run = Some(w.rect);
+                    }
+                }
+            }
+        }
+        if let Some(r) = run {
+            out.push(r);
+        }
+        start = end;
+    }
+    out
+}
+
+/// Text for a selection in reading order: `join_words` rules inside a line
+/// (space between Latin words, none inside CJK) and `\n` between lines.
+fn selection_text(words: &[Word], mut picked: Vec<usize>) -> String {
+    picked.sort_by_key(|&i| (words[i].line, words[i].rect.l));
+    let mut lines: Vec<(u32, Vec<&str>)> = Vec::new();
+    for i in picked {
+        let w = &words[i];
+        match lines.last_mut() {
+            Some((line, parts)) if *line == w.line => parts.push(w.text.as_str()),
+            _ => lines.push((w.line, vec![w.text.as_str()])),
+        }
+    }
+    lines
+        .iter()
+        .map(|(_, parts)| join_words(parts.iter().copied()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Draws every word box + white text once, then resolves the alpha channel:
 /// boxes and glyph pixels opaque, everything else the invisible-but-solid
 /// background alpha.
@@ -181,18 +278,38 @@ unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word]) {
     let black = CreateSolidBrush(COLORREF(0));
     let face = wide(TEXT_FACE);
     let mut fonts: Vec<(i32, HFONT)> = Vec::new();
+    // `lines`: one continuous band per line segment, so the gaps between
+    // words stop showing the screen through. The glyphs keep their OCR
+    // positions, so Latin spaces and CJK spacing stay exactly as rendered.
+    if fill_lines() {
+        for seg in line_segments(words) {
+            let rc = clip_rect(seg, w, h);
+            if rc.w() < 2 || rc.h() < 2 {
+                continue;
+            }
+            let win = to_win(rc);
+            let _ = FillRect(hdc, &win, black);
+            for y in rc.t..rc.b {
+                for x in rc.l..rc.r {
+                    *bits.add((y * w + x) as usize) |= BOX_ALPHA;
+                }
+            }
+        }
+    }
     for word in words {
         let rc = clip_rect(word.rect, w, h);
         if rc.w() < 2 || rc.h() < 2 {
             continue;
         }
-        let win = to_win(rc);
-        let _ = FillRect(hdc, &win, black);
-        // Opaque box first; the text pass may rewrite alpha on glyph pixels,
-        // the RGB pass below restores those.
-        for y in rc.t..rc.b {
-            for x in rc.l..rc.r {
-                *bits.add((y * w + x) as usize) |= BOX_ALPHA;
+        if !fill_lines() {
+            let win = to_win(rc);
+            let _ = FillRect(hdc, &win, black);
+            // Opaque box first; the text pass may rewrite alpha on glyph
+            // pixels, the RGB pass below restores those.
+            for y in rc.t..rc.b {
+                for x in rc.l..rc.r {
+                    *bits.add((y * w + x) as usize) |= BOX_ALPHA;
+                }
             }
         }
         let em = (rc.h() * 4 / 5).clamp(8, 64);
@@ -357,11 +474,7 @@ unsafe fn finish_selection(hwnd: HWND, start: POINT, end: POINT) {
         present(hwnd);
         return;
     }
-    let text = if picked.len() == 1 {
-        s.words[picked[0]].text.clone()
-    } else {
-        join_words(picked.iter().map(|&i| s.words[i].text.as_str()))
-    };
+    let text = selection_text(&s.words, picked.clone());
     s.selected = picked;
     present(hwnd);
     match copy_text(hwnd, &text) {
@@ -463,8 +576,70 @@ mod tests {
     fn word(text: &str, l: i32, t: i32, r: i32, b: i32) -> Word {
         Word {
             text: text.to_string(),
+            line: 0,
             rect: Rect { l, t, r, b },
         }
+    }
+
+    fn word_on(line: u32, text: &str, l: i32, t: i32, r: i32, b: i32) -> Word {
+        Word {
+            text: text.to_string(),
+            line,
+            rect: Rect { l, t, r, b },
+        }
+    }
+
+    #[test]
+    fn line_segments_join_small_gaps_and_keep_columns_apart() {
+        let words = [
+            word_on(0, "ab", 0, 0, 20, 20),
+            word_on(0, "cd", 24, 0, 44, 20),
+            word_on(0, "ef", 60, 0, 80, 20),
+            word_on(1, "gh", 0, 30, 20, 50),
+        ];
+        let seg = line_segments(&words);
+        assert_eq!(seg.len(), 3);
+        assert_eq!(
+            seg[0],
+            Rect {
+                l: 0,
+                t: 0,
+                r: 44,
+                b: 20
+            }
+        );
+        assert_eq!(
+            seg[1],
+            Rect {
+                l: 60,
+                t: 0,
+                r: 80,
+                b: 20
+            }
+        );
+        assert_eq!(
+            seg[2],
+            Rect {
+                l: 0,
+                t: 30,
+                r: 20,
+                b: 50
+            }
+        );
+    }
+
+    #[test]
+    fn selection_text_keeps_line_breaks_and_cjk_spacing() {
+        let words = [
+            word_on(0, "Quick", 0, 0, 40, 20),
+            word_on(0, "brown", 50, 0, 100, 20),
+            word_on(0, "你", 110, 0, 120, 20),
+            word_on(0, "好", 120, 0, 130, 20),
+            word_on(1, "world", 0, 30, 40, 50),
+        ];
+        let text = selection_text(&words, vec![4, 1, 3, 0, 2]);
+        assert_eq!(text, "Quick brown 你好\nworld");
+        assert_eq!(selection_text(&words, vec![1]), "brown");
     }
 
     #[test]

@@ -3,6 +3,15 @@
 //! characters are CJK — Chinese/Japanese/Korean text is written without
 //! inter-word spaces, mixed Latin+CJK text still separates at the boundary.
 
+/// CJK *letters* (Han, kana, Hangul) without CJK punctuation: line-level
+/// decisions use this, so full-width punctuation or one stray glyph does not
+/// turn a Latin line into a "CJK" line.
+pub fn is_cjk_letter(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF |
+        0xAC00..=0xD7AF | 0xF900..=0xFAFF)
+}
+
 /// True for Han, kana, Hangul and CJK/full-width punctuation.
 pub fn is_cjk(c: char) -> bool {
     matches!(
@@ -74,6 +83,17 @@ mod tests {
         assert!(!is_cjk('1'));
         assert!(!is_cjk(' '));
         assert!(!is_cjk(','));
+    }
+
+    #[test]
+    fn cjk_letters_exclude_punctuation() {
+        assert!(is_cjk_letter('中'));
+        assert!(is_cjk_letter('あ'));
+        assert!(is_cjk_letter('한'));
+        assert!(!is_cjk_letter('，'));
+        assert!(!is_cjk_letter('；'));
+        assert!(!is_cjk_letter('a'));
+        assert!(is_cjk('，'));
     }
 
     #[test]

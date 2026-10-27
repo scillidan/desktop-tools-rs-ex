@@ -254,15 +254,23 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
       `HTTRANSPARENT`) from the capture until the mask owns the region.
       Observed with a fast exstyle poll in `mask_test.ps1`.
 - [x] After OCR the frame region is covered by `dt-ocr.mask`: one topmost
-      per-pixel-alpha layered window, an opaque black box per word with the
-      word re-rendered white (`Microsoft YaHei`), gaps showing the live
-      screen. Gaps use alpha 1, not 0 — an alpha-0 layered pixel is
+      per-pixel-alpha layered window. `[mask] fill = "lines"` (default)
+      paints one continuous black band per OCR line segment (word gaps below
+      3/4 em are filled; tabs/columns stay separate) with the words
+      re-rendered white (`Microsoft YaHei`) at their exact OCR positions, so
+      Latin spaces and CJK spacing need no re-layout; `"boxes"` restores the
+      per-word look. Gaps use alpha 1, not 0 — an alpha-0 layered pixel is
       click-through, alpha 1 blocks while staying invisible. Pixel-sampled:
-      box black, glyphs light, gap white.
+      box black, glyphs light, inter-line gap live, band continuous between
+      words.
 - [x] Click a word → `CF_UNICODETEXT` holds exactly that word.
-- [x] Press-drag a rectangle → one paragraph: Latin words space-joined, CJK
-      runs without spaces (`text::join_words`, 5 unit tests). End-to-end
-      clipboard read: `Quick brown 你好世界`.
+- [x] Press-drag a rectangle → one selection in reading order: `join_words`
+      inside a line (Latin spaces, no CJK spaces) and `\n` between OCR lines
+      (`mask::selection_text`, unit tests). End-to-end clipboard read:
+      `Quick brown\n你好世界`.
+- [x] `toggle` binding (default `win+shift+o`; Win+O is reserved by Windows
+      and `RegisterHotKey` fails with 1409) hides/shows the existing mask:
+      same HWND, same words, no re-OCR.
 - [x] Esc or right-click dismisses; right-click closes on button-up so the
       app underneath never receives the stray release. The frame is
       interactive again in its previous mode.
@@ -270,14 +278,44 @@ P0.4 replaces the provider behind `ocr::Word` / `ocr::Outcome`.
       the real screen rather than our own overlay.
 - [x] `~\.temp\opencode\mask_test.ps1` drives the whole cycle at message
       level (known Latin+CJK text window under the frame, posted capture
-      hotkey, posted click/drag/Esc/right-click): 23 checks pass, including
+      hotkey, posted click/drag/Esc/right-click): 24 checks pass, including
       the click-through exstyle while OCR runs, `WindowFromPoint` proving
-      gaps belong to the mask and points outside the frame do not, and pin
-      surviving a capture + dismiss.
+      gaps belong to the mask and points outside the frame do not, the
+      continuous line band, the toggle hide/show with an unchanged HWND, and
+      pin surviving a capture + dismiss.
 - [ ] PHYSICAL: `ctrl+enter` over a real mixed Latin+CJK screenshot; click
-      one word; drag a paragraph; Esc; right-click.
+      one word; drag a two-line paragraph (paste must keep the line break);
+      `win+shift+o` twice (hide/show, no re-OCR); switch `fill = "boxes"` to
+      compare; Esc; right-click.
 - [ ] PHYSICAL: while OCR runs, click a button under the frame — the click
       must reach the app, not the frame.
+
+### OCR quality (post-P0.3 feedback: small/compact fonts)
+
+- [x] Native resolution was unusable on 8-10 pt screen text (`The qu1Ck 0r0
+      n fOX ...`). Captures are now upscaled with GDI's halftone stretch
+      before recognition: `[ocr] scale` (1..=4, default 4), clamped by the
+      engine's `MaxImageDimension` (10000 here) and a 16 Mpx budget. Word
+      rects are divided back by the same factor, so mask geometry is
+      unchanged.
+- [x] `[ocr] language` = auto (default) / a tag (`en`, `zh`, ...). Auto runs
+      the zh engine, then an English pass when Latin is present, and merges
+      line by line: lines with ≥20% CJK letters keep the zh result, Latin
+      lines take the en result (an en line is consumed at most once). The en
+      model drops CJK entirely and the zh model mangles long Latin runs, so
+      neither alone covers mixed text.
+- [x] `[ocr] scale` / `[ocr] language` hot-reload; the next capture picks
+      them up.
+- [x] Measured on a 10 pt Sarasa Mono SC sample (800x600 frame): 1x garbage;
+      2x ~90%; 4x + merge = line 1/2 exact, pure-CJK line exact, one 0/O
+      confusion in `OCR`. RapidOCR (AHK-ScreenOCR pipeline) on the same PNG:
+      all four lines correct at native resolution.
+- [x] RapidOCR cost measured: ~1.6 s per `uv run` CLI call (warm cache) and
+      line-level boxes only. That is the P0.4 decision: persistent worker and
+      word segmentation, or accept losing word-level clicks.
+- [ ] PHYSICAL: frame over real small/compact text (e.g. Sarasa Mono 10 pt),
+      compare the mask text with the source; try `scale = 1` for contrast and
+      `language = "en"` on a Latin-only page.
 
 ## P0.4 OCR engines + language routing
 - [ ] Chinese UI text under `auto` OCRs correctly (RapidOCR path).

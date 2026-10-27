@@ -60,6 +60,7 @@ fn run() -> Result<()> {
     let cfg_path = dt_common::config::exe_dir_file(config::CONFIG_NAME)?;
     let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
     let cfg = config::parse(&text)?;
+    mask::set_fill(cfg.mask_fill);
     logline(&format!(
         "config loaded from {} (frame {}x{})",
         cfg_path.display(),
@@ -67,8 +68,16 @@ fn run() -> Result<()> {
         cfg.frame_h
     ));
 
-    let frame =
-        unsafe { frame::create(cfg.frame_w, cfg.frame_h, cfg.show_hint, cfg.font.clone())? };
+    let frame = unsafe {
+        frame::create(
+            cfg.frame_w,
+            cfg.frame_h,
+            cfg.show_hint,
+            cfg.font.clone(),
+            cfg.ocr_scale,
+            cfg.ocr_language.clone(),
+        )?
+    };
     FRAME_HWND.store(frame.0 as isize, std::sync::atomic::Ordering::SeqCst);
 
     let mut hotkeys = register_hotkeys(frame, &cfg);
@@ -103,7 +112,16 @@ fn run() -> Result<()> {
                         logline("config reloaded, hotkeys re-registered");
                         hotkeys.unregister_all(frame);
                         hotkeys = register_hotkeys(frame, &new_cfg);
-                        unsafe { frame::set_prefs(frame, new_cfg.show_hint, new_cfg.font.clone()) };
+                        unsafe {
+                            frame::set_prefs(
+                                frame,
+                                new_cfg.show_hint,
+                                new_cfg.font.clone(),
+                                new_cfg.ocr_scale,
+                                new_cfg.ocr_language.clone(),
+                            )
+                        };
+                        mask::set_fill(new_cfg.mask_fill);
                     }
                     Err(e) => logline(&format!("config reload failed, keeping old: {e:#}")),
                 }
@@ -147,6 +165,7 @@ fn dispatch(action: Action, frame: HWND) {
         Action::Resize => unsafe { frame::begin_spec(frame) },
         Action::Pin => unsafe { frame::toggle_pin(frame) },
         Action::Move => unsafe { frame::to_move(frame) },
+        Action::Toggle => unsafe { mask::toggle() },
         Action::Capture => {
             // Read the real screen: a previous mask would be re-captured.
             unsafe { mask::dismiss() };
