@@ -528,20 +528,16 @@ pub unsafe fn capture_frame(hwnd: HWND) -> Result<()> {
 }
 
 /// Puts an explicit rect on screen as a pinned image; no clipboard, no file.
-pub unsafe fn pin_rect(
-    rect: RECT,
-    border: crate::config::PinBorder,
-    line_color: u32,
-) -> Result<()> {
+pub unsafe fn pin_rect(rect: RECT, style: crate::pin::Style) -> Result<()> {
     let shot = grab(rect)?;
     let (w, h) = (shot.w, shot.h);
     let data = shot.bgra();
-    crate::pin::show(rect, w, h, &data, border, line_color)
+    crate::pin::show(rect, w, h, &data, style)
 }
 
 /// Same, for the focused window.
-pub unsafe fn pin_window(border: crate::config::PinBorder, line_color: u32) -> Result<()> {
-    pin_rect(window_target()?, border, line_color)
+pub unsafe fn pin_window(style: crate::pin::Style) -> Result<()> {
+    pin_rect(window_target()?, style)
 }
 
 /// Folder picker for Ctrl+S. `SHBrowseForFolderW` needs no extra COM wiring

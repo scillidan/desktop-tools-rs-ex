@@ -55,6 +55,10 @@ window scaling. Same user, same machine, same conventions.
   UTF-8 (`UTF8Encoding($false)`).
 - Injected input cannot drive a popup menu here either (menu windows ignore
   synthetic mouse and keyboard): a tray menu can only be clicked physically.
+- The verification harnesses are not headless: each opens a real WinForms test
+  window, calls `SetForegroundWindow` and pins images. Never run them while the
+  user may be working — tell them first and run the batch once at the end, or
+  the focus stealing looks like the app is spawning windows.
 - `RegisterHotKey` ids are 1-based indexes into `Action::ALL` (1 draw,
   2 resize, 3 pin, 4 capture, 5 frame_window, 6 pin_shot, 7 move, 8 toggle);
   `PostMessage WM_HOTKEY`
@@ -88,7 +92,8 @@ SizeSpec input/tune, status strip; `interaction.rs` pure five-state machine;
 RegisterHotKey; `ocr.rs` capture → upscale → Windows OCR → line merge;
 `mask.rs` layered mask, overlay/reader rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
-Shell_NotifyIconW; `icon.rs`/`build.rs` procedural icon.
+Shell_NotifyIconW; `menu.rs` owner-drawn tray popup; `icon.rs`/`build.rs`
+procedural icon.
 
 ## Capture sinks
 
@@ -119,10 +124,11 @@ save keys write PNG.
 
 A pinned shot is a borderless layered tool window: drag inside to move
 (`HTCAPTION`), and drag an image edge/corner through our own mouse capture to
-resize with the source aspect (`pin::lock_aspect`). Hovering an edge paints a
-cyan grip and `WM_SETCURSOR` gives the matching sizing cursor. `[pin] border`
-selects the edge: `hatch` (default, 6 px translucent cyan diagonal shadow with a
-1 px outline), `line` (1 px, `line-color` accepts names or `#RRGGBB`) or `none`.
+resize with the source aspect (`pin::lock_aspect`). Hovering an edge shows only
+the matching resize-arrow cursor (`WM_SETCURSOR`) — no painted grip blocks.
+`[pin] border` selects the edge: `hatch` (default, 6 px translucent diagonal
+shadow with a 1 px outline, `hatch-color` default yellow), `line` (1 px,
+`line-color` accepts names or `#RRGGBB`) or `none`.
 Do not bring back `WS_THICKFRAME`: its non-client border ate image pixels while
 shrinking, and a layered window was not invalidated during enlargement, leaving
 ghosts. Esc/right-click closes; creation fits the image into the work area.
@@ -171,12 +177,20 @@ tray icon and the 1 s config timer, because a destroyed window silently takes
 its hotkey and tray registrations with it. Its tray callback must be handled in
 the host window *procedure*: the shell sends (`SendNotifyMessage`) rather than
 posts it, so it never appears in the `GetMessage` loop — handling it there made
-right-click do nothing. `WM_CLOSE` on a frame hides it
+right-click do nothing. `WM_CLOSE` on a frame hides it and its status strip
 (mask dismissed) instead of destroying it; the next command calls
 `frame::ensure_visible` and the draw overlay re-shows it via `place`. Only the
-tray Quit menu (or WM_QUIT) ends the process. Keep the popup owned by our own
-window — a foreign foreground owner makes `TrackPopupMenu` return 0 without
-showing anything; desktop-tools-rs `pick_sizer` is the reference.
+tray Quit item (or WM_QUIT) ends the process. The tray menu is our own
+owner-drawn popup (`menu.rs`), not `TrackPopupMenu`: the native Win11 menu
+stayed on screen and blocked the frame. Our popup closes on outside click,
+right-click, Esc or focus loss.
+
+A named mutex (`Local\dt-ocr.single`) makes the process single-instance: a
+second launch logs `another dt-ocr instance is already running; exiting` before
+creating a host, frame or tray icon. Without it, quitting one tray leaves the
+other instances running and looking like the app cannot be exited. Hotkeys
+already use `MOD_NOREPEAT`; the message loop also drops the same action arriving
+twice within 150 ms, so injected duplicates cannot stack capture/pin windows.
 
 P0.1 status: workspace + dt-common (`keys`, `layout`, `config` exe-relative
 helpers) + dt-ocr (empty window, `dt-ocr.toml` next to exe, `dt-ocr.log`).

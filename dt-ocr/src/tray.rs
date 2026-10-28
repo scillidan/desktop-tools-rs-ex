@@ -4,7 +4,7 @@
 
 use anyhow::{ensure, Result};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -12,7 +12,6 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub const WM_TRAY: u32 = WM_APP + 9;
-const QUIT_ID: usize = 1;
 
 static TASKBAR_CREATED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -88,37 +87,7 @@ fn notify_data(
 
 /// Called by the resident host window procedure for the shell's WM_TRAY callback.
 pub unsafe fn handle(hwnd: HWND, lparam: LPARAM) {
-    if !matches!(lparam.0 as u32 & 0xffff, WM_RBUTTONUP | WM_CONTEXTMENU) {
-        return;
-    }
-    let Ok(menu) = CreatePopupMenu() else {
-        return;
-    };
-    if AppendMenuW(menu, MF_STRING, QUIT_ID, w!("Quit")).is_err() {
-        let _ = DestroyMenu(menu);
-        return;
-    }
-    let mut pt = POINT::default();
-    if GetCursorPos(&mut pt).is_err() {
-        let _ = DestroyMenu(menu);
-        return;
-    }
-    // The menu must be owned by this process and needs no foreground dance:
-    // desktop-tools-rs's pick_sizer uses the same pattern. Both windows here
-    // belong to us, so TrackPopupMenu shows rather than returning 0.
-    let cmd = TrackPopupMenu(
-        menu,
-        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
-        pt.x,
-        pt.y,
-        None,
-        hwnd,
-        None,
-    );
-    // Without this the menu can stay "stuck" after dismissal.
-    let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-    let _ = DestroyMenu(menu);
-    if cmd.0 == QUIT_ID as i32 {
-        PostQuitMessage(0);
+    if matches!(lparam.0 as u32 & 0xffff, WM_RBUTTONUP | WM_CONTEXTMENU) {
+        crate::menu::show(hwnd);
     }
 }

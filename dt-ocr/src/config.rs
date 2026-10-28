@@ -42,11 +42,13 @@ pub struct Config {
     /// Directory for saved captures (env vars expanded); empty = clipboard
     /// only, no file.
     pub capture_dir: String,
-    /// Pin edge decoration: translucent cyan hatch (default), a solid line,
-    /// or nothing.
+    /// Pin edge decoration: translucent hatch (default), a solid line, or
+    /// nothing.
     pub pin_border: PinBorder,
     /// `line` border colour, 0xRRGGBB (default black).
     pub pin_line_color: u32,
+    /// `hatch` colour, 0xRRGGBB (default yellow).
+    pub pin_hatch_color: u32,
     pub bindings: Bindings,
 }
 
@@ -203,6 +205,7 @@ impl Default for Config {
             capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
             pin_border: PinBorder::Hatch,
             pin_line_color: 0,
+            pin_hatch_color: 0xffff00,
             bindings: Bindings::default(),
         }
     }
@@ -378,6 +381,14 @@ pub fn parse(text: &str) -> Result<Config> {
                         ),
                     }
                 }
+                if let Some(v) = t.get("hatch-color") {
+                    match v.as_str().and_then(parse_color) {
+                        Some(c) => cfg.pin_hatch_color = c,
+                        None => eprintln!(
+                            "warn: pin.hatch-color must be a colour name or #RRGGBB; using yellow"
+                        ),
+                    }
+                }
             }
             None => eprintln!("warn: [pin] must be a table; using defaults"),
         }
@@ -430,6 +441,7 @@ mod tests {
                 capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
                 pin_border: PinBorder::Hatch,
                 pin_line_color: 0,
+                pin_hatch_color: 0xffff00,
                 bindings: Bindings::default(),
             }
         );
@@ -445,6 +457,9 @@ mod tests {
         let cfg = parse("[pin]\nborder = \"bogus\"\nline-color = \"nope\"\n").unwrap();
         assert_eq!(cfg.pin_border, PinBorder::Hatch);
         assert_eq!(cfg.pin_line_color, 0);
+        assert_eq!(cfg.pin_hatch_color, 0xffff00);
+        let cfg = parse("[pin]\nhatch-color = \"#ffaa00\"\n").unwrap();
+        assert_eq!(cfg.pin_hatch_color, 0xffaa00);
         assert_eq!(parse_color("Black"), Some(0));
         assert_eq!(parse_color("#00FF00"), Some(0x00ff00));
         assert_eq!(parse_color("#12345"), None);

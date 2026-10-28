@@ -8,7 +8,9 @@ in `AGENTS.md`; this file is only what is left to build.
 
 - **P0.1** workspace + `dt-common` (keys, layout, exe-relative config).
 - **P0.2** frame window: five-state interaction model, SizeSpec resize, mode
-  hotkeys, one frame per virtual desktop, native tray, resident host.
+  hotkeys, one frame per virtual desktop, native tray, resident host. Single
+  instance via `Local\dt-ocr.single`; duplicate `WM_HOTKEY`s inside 150 ms are
+  dropped so repeated input cannot stack windows.
 - **P0.3** OCR mask: click-through capture, frozen-snapshot overlay with
   per-word hit-testing, line-band fill, reader layout, `toggle` binding.
 - **P0.6** release packaging (tag workflow, Scoop manifests; the `-ex` hash
@@ -68,10 +70,12 @@ in `AGENTS.md`; this file is only what is left to build.
   `pin_no_frame_test.ps1` (3), `pin_border_modes_test.ps1` (2),
   `frame_focus_test.ps1` + the `pin` unit tests.
 - Done: cyan capture flash; `[pin] border = hatch | line | none` (hatch is a
-  6 px translucent cyan diagonal shadow; `line-color` names or `#RRGGBB`), and
-  hovering an edge shows a cyan grip plus the sizing cursor. Pin resize is our
-  own mouse capture, not `WS_THICKFRAME` (the NC border ate pixels; layered
-  resize ghosted). No frame shadow.
+  6 px translucent diagonal shadow, `hatch-color` yellow by default; line uses
+  `line-color`), and hovering an edge shows only the resize-arrow cursor. Pin
+  resize is our own mouse capture, not `WS_THICKFRAME` (the NC border ate
+  pixels; layered resize ghosted). No frame shadow.
+- Done: tray menu is our own owner-drawn popup (not Win11 `TrackPopupMenu`),
+  and hiding a frame also hides its status strip. Single-instance mutex.
 - Next: a floating action bar after a selection (copy / save / pin / flameshot /
   record on one rect), per-desktop pinning, and the bridges (flameshot `gui`,
   the recording tool once P1.3 lands). Flameshot stays the better free-form

@@ -554,7 +554,15 @@ pub unsafe fn ensure_visible(hwnd: HWND) {
 }
 
 /// Hides the frame while a new region is drawn; `place` shows it again.
+/// The status strip is an owned popup, not a child: hiding the frame alone
+/// leaves a thin, click-through grey bar on the desktop.
 pub unsafe fn hide(hwnd: HWND) {
+    if !IsWindow(Some(hwnd)).as_bool() {
+        return;
+    }
+    if let Some(s) = state_opt(hwnd) {
+        let _ = ShowWindow(s.status, SW_HIDE);
+    }
     let _ = ShowWindow(hwnd, SW_HIDE);
 }
 
@@ -699,7 +707,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // daemon and must outlive any frame.
         WM_CLOSE => {
             crate::mask::dismiss();
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            hide(hwnd);
             LRESULT(0)
         }
         WM_DESTROY => {

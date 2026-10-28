@@ -40,11 +40,12 @@ size = 10
 [capture]
 dir = "%USERPROFILE%\\Pictures\\dt-ocr"
 
-# Pinned-image edge. "hatch" = translucent cyan diagonal shadow (6 px, the
+# Pinned-image edge. "hatch" = translucent diagonal shadow (6 px, the
 # default), "line" = one solid pixel using line-color, "none" = no edge.
-# Hovering an edge shows a cyan grip and the resize cursor in every mode.
+# Hovering an edge shows only the resize-arrow cursor in every mode.
 [pin]
-border = "hatch"
+border = "hatch"       # hatch | line | none
+hatch-color = "yellow" # colour name or #RRGGBB; only used by border = "hatch"
 line-color = "black"   # colour name or #RRGGBB; only used by border = "line"
 
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.

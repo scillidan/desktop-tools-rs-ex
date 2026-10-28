@@ -15,6 +15,7 @@ mod hotkeys;
 mod icon;
 mod interaction;
 mod mask;
+mod menu;
 mod ocr;
 mod overlay;
 mod pin;
@@ -66,13 +67,33 @@ fn run() -> Result<()> {
         use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
     }
+    // One resident daemon only. Several instances each own a frame and cannot
+    // register the same hotkeys; quitting the tray of one leaves the others
+    // running, which looks like the app refuses to exit.
+    let _single = unsafe {
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+        match CreateMutexW(None, true, windows::core::w!("Local\\dt-ocr.single")) {
+            Ok(handle) => {
+                if GetLastError() == ERROR_ALREADY_EXISTS {
+                    logline("another dt-ocr instance is already running; exiting");
+                    return Ok(());
+                }
+                Some(handle)
+            }
+            Err(e) => {
+                logline(&format!("warn: single-instance mutex unavailable: {e}"));
+                None
+            }
+        }
+    };
     let cfg_path = dt_common::config::exe_dir_file(config::CONFIG_NAME)?;
     let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
     let mut cfg = config::parse(&text)?;
     mask::set_fill(cfg.mask_fill);
     mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
     set_capture_dir(&cfg.capture_dir);
-    set_pin_style(cfg.pin_border, cfg.pin_line_color);
+    set_pin_style(cfg.pin_border, cfg.pin_line_color, cfg.pin_hatch_color);
     logline(&format!(
         "config loaded from {} (frame {}x{})",
         cfg_path.display(),
@@ -109,6 +130,17 @@ fn run() -> Result<()> {
         }
         if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_HOTKEY {
             if let Some(action) = hotkeys.action_of(msg.wParam.0 as i32) {
+                // MOD_NOREPEAT already suppresses held-key repeats; this also
+                // swallows duplicate injected messages before they stack pins.
+                let mut last = LAST_HOTKEY
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                let repeated = hotkey_repeat(&mut last, action, std::time::Instant::now());
+                drop(last);
+                if repeated {
+                    logline(&format!("hotkey repeat ignored: {action:?}"));
+                    continue;
+                }
                 logline(&format!("hotkey: {action:?}"));
                 match frames.current(&cfg) {
                     Ok(current) => dispatch(action, current),
@@ -139,7 +171,11 @@ fn run() -> Result<()> {
                         }
                         mask::set_fill(new_cfg.mask_fill);
                         set_capture_dir(&new_cfg.capture_dir);
-                        set_pin_style(new_cfg.pin_border, new_cfg.pin_line_color);
+                        set_pin_style(
+                            new_cfg.pin_border,
+                            new_cfg.pin_line_color,
+                            new_cfg.pin_hatch_color,
+                        );
                         mask::set_style(
                             new_cfg.mask_font.clone(),
                             new_cfg.mask_size,
@@ -238,13 +274,13 @@ fn dispatch(action: Action, frame: HWND) {
                     Some(rect) => {
                         // Hide first: our own border must not be in the image.
                         frame::hide(frame);
-                        let r = capture::pin_rect(rect, pin_border(), pin_line_color());
+                        let r = capture::pin_rect(rect, pin_style());
                         if r.is_err() {
                             frame::ensure_visible(frame);
                         }
                         r
                     }
-                    None => capture::pin_window(pin_border(), pin_line_color()),
+                    None => capture::pin_window(pin_style()),
                 }
             };
             if let Err(e) = r {
@@ -289,7 +325,7 @@ pub(crate) fn frame_pin(frame: HWND) {
         match frame::visible_rect(frame) {
             Some(rect) => {
                 frame::hide(frame);
-                let r = capture::pin_rect(rect, pin_border(), pin_line_color());
+                let r = capture::pin_rect(rect, pin_style());
                 if r.is_err() {
                     frame::ensure_visible(frame);
                 }
@@ -301,6 +337,25 @@ pub(crate) fn frame_pin(frame: HWND) {
     if let Err(e) = r {
         logline(&format!("pin frame failed: {e:#}"));
     }
+}
+
+static LAST_HOTKEY: std::sync::Mutex<Option<(Action, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// `MOD_NOREPEAT` covers a held key; this also drops duplicate injected
+/// `WM_HOTKEY`s that arrive back-to-back and would stack capture/pin windows.
+fn hotkey_repeat(
+    last: &mut Option<(Action, std::time::Instant)>,
+    action: Action,
+    now: std::time::Instant,
+) -> bool {
+    if let Some((prev, at)) = *last {
+        if prev == action && now.duration_since(at).as_millis() < 150 {
+            return true;
+        }
+    }
+    *last = Some((action, now));
+    false
 }
 
 static CAPTURE_DIR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -318,33 +373,23 @@ pub fn set_capture_dir(dir: &str) {
     }
 }
 
-static PIN_BORDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-static PIN_LINE_COLOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static PIN_STYLE: std::sync::Mutex<pin::Style> = std::sync::Mutex::new(pin::Style::DEFAULT);
 
-fn set_pin_style(border: config::PinBorder, line_color: u32) {
-    use config::PinBorder;
-    use std::sync::atomic::Ordering::SeqCst;
-    PIN_BORDER.store(
-        match border {
-            PinBorder::Hatch => 0,
-            PinBorder::Line => 1,
-            PinBorder::None => 2,
-        },
-        SeqCst,
-    );
-    PIN_LINE_COLOR.store(line_color, SeqCst);
-}
-
-fn pin_border() -> config::PinBorder {
-    match PIN_BORDER.load(std::sync::atomic::Ordering::SeqCst) {
-        1 => config::PinBorder::Line,
-        2 => config::PinBorder::None,
-        _ => config::PinBorder::Hatch,
+fn set_pin_style(border: config::PinBorder, line_color: u32, hatch_color: u32) {
+    if let Ok(mut style) = PIN_STYLE.lock() {
+        *style = pin::Style {
+            border,
+            line_color,
+            hatch_color,
+        };
     }
 }
 
-fn pin_line_color() -> u32 {
-    PIN_LINE_COLOR.load(std::sync::atomic::Ordering::SeqCst)
+fn pin_style() -> pin::Style {
+    PIN_STYLE
+        .lock()
+        .map(|style| *style)
+        .unwrap_or(pin::Style::DEFAULT)
 }
 
 static FRAME_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -373,5 +418,35 @@ fn logline(msg: &str) {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let _ = writeln!(f, "[{secs}] {msg}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hotkey_repeat;
+    use crate::config::Action;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn duplicate_hotkeys_inside_the_gate_are_dropped() {
+        let mut last = None;
+        let t = Instant::now();
+        assert!(!hotkey_repeat(&mut last, Action::PinShot, t));
+        assert!(hotkey_repeat(
+            &mut last,
+            Action::PinShot,
+            t + Duration::from_millis(40)
+        ));
+        assert!(!hotkey_repeat(
+            &mut last,
+            Action::PinShot,
+            t + Duration::from_millis(200)
+        ));
+        // A different action is never treated as a repeat.
+        assert!(!hotkey_repeat(
+            &mut last,
+            Action::Draw,
+            t + Duration::from_millis(210)
+        ));
     }
 }

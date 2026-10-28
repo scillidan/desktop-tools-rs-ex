@@ -1,8 +1,8 @@
 //! Pinned screenshots: a borderless always-on-top layered window showing the
-//! captured image, edged by translucent cyan hatch (or a solid line, or
+//! captured image, edged by translucent yellow hatch (or a solid line, or
 //! nothing). Interior drag uses the system move loop; edge drag is our own
 //! aspect-locked resize, so there is no non-client border to eat pixels or
-//! leave ghosts. Hovering an edge shows a cyan grip and a resize cursor.
+//! leave ghosts. Hovering an edge shows only the resize-arrow cursor.
 //! Esc/right-click closes.
 //! shortcut: no virtual-desktop isolation — add per-desktop pinning with the
 //! `desktops.rs` pattern if pins start leaking across desktops.
@@ -22,7 +22,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_ESCAPE,
+    ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetCursorPos, GetWindowLongPtrW,
@@ -38,10 +38,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const CLASS: PCWSTR = w!("dt-ocr.pin");
-/// `WM_MOUSELEAVE` lives under UI::Controls in the windows crate.
-const WM_MOUSELEAVE: u32 = 0x02A3;
-/// Resize grip inside the image edge, in pixels.
+/// Edge zone for the resize-arrow hit test, in pixels.
 const GRIP: i32 = 6;
+
+/// Edge decoration selected in `[pin]`.
+#[derive(Clone, Copy)]
+pub struct Style {
+    pub border: PinBorder,
+    pub line_color: u32,
+    pub hatch_color: u32,
+}
+
+impl Style {
+    pub const DEFAULT: Self = Self {
+        border: PinBorder::Hatch,
+        line_color: 0,
+        hatch_color: 0xffff00,
+    };
+}
 
 /// Decoration margin: hatched shadow, one-pixel line, or none.
 fn margin(border: PinBorder) -> i32 {
@@ -58,13 +72,9 @@ struct Pin {
     old: HGDIOBJ,
     w: i32,
     h: i32,
-    border: PinBorder,
-    line_color: u32,
+    style: Style,
     margin: i32,
     drag: Option<ResizeDrag>,
-    hover: u32,
-    hover_pt: POINT,
-    tracking: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -154,17 +164,23 @@ fn sizing_side(hit: u32) -> u32 {
 }
 
 /// One margin pixel. `[0,0,0,0]` inside the image (the capture is painted
-/// there later) and on empty hatch gaps. Hatch is cyan at ~43% alpha, with a
-/// slightly stronger outline pixel next to the image so the edge stays legible.
-fn band_pixel(
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    margin: i32,
-    border: PinBorder,
-    line_color: u32,
-) -> [u8; 4] {
+/// there later) and on empty hatch gaps. Hatch is the configured colour at
+/// ~43% alpha, with a stronger outline pixel next to the image.
+fn band_pixel(x: i32, y: i32, w: i32, h: i32, margin: i32, style: Style) -> [u8; 4] {
+    let Style {
+        border,
+        line_color,
+        hatch_color,
+    } = style;
+    let premul = |color: u32, alpha: u32| {
+        let scale = |c: u32| ((c * alpha) / 255) as u8;
+        [
+            scale(color & 0xff),
+            scale((color >> 8) & 0xff),
+            scale((color >> 16) & 0xff),
+            alpha as u8,
+        ]
+    };
     let (ix0, iy0) = (margin, margin);
     let (ix1, iy1) = (w - margin - 1, h - margin - 1);
     if x >= ix0 && x <= ix1 && y >= iy0 && y <= iy1 {
@@ -195,69 +211,16 @@ fn band_pixel(
             [b, g, r, 255]
         }
         PinBorder::Line => [0, 0, 0, 0],
-        PinBorder::Hatch if dx <= 1 && dy <= 1 => [0, 180, 180, 180],
+        PinBorder::Hatch if dx <= 1 && dy <= 1 => premul(hatch_color, 180),
         // 2 of every 5 diagonal pixels: visible at 6 px without turning solid.
-        PinBorder::Hatch if (x + y).rem_euclid(5) < 2 => [0, 110, 110, 110],
+        PinBorder::Hatch if (x + y).rem_euclid(5) < 2 => premul(hatch_color, 110),
         PinBorder::Hatch => [0, 0, 0, 0],
-    }
-}
-
-/// Rounded cyan grip drawn over the image edge while the pointer is near it.
-fn paint_grip(pixels: &mut [u8], w: i32, margin: i32, iw: i32, ih: i32, side: u32, local: POINT) {
-    if iw < 24 || ih < 24 {
-        return;
-    }
-    let clamp = |v: i32, lo: i32, hi: i32| v.clamp(lo, hi);
-    let lx = clamp(local.x, 0, iw - 1);
-    let ly = clamp(local.y, 0, ih - 1);
-    let (cx, cy, rw, rh) = match side {
-        HTLEFT => (3, clamp(ly, 9, ih - 10), 4, 18),
-        HTRIGHT => (iw - 5, clamp(ly, 9, ih - 10), 4, 18),
-        HTTOP => (clamp(lx, 9, iw - 10), 3, 18, 4),
-        HTBOTTOM => (clamp(lx, 9, iw - 10), ih - 5, 18, 4),
-        HTTOPLEFT => (4, 4, 8, 8),
-        HTTOPRIGHT => (iw - 6, 4, 8, 8),
-        HTBOTTOMLEFT => (4, ih - 6, 8, 8),
-        HTBOTTOMRIGHT => (iw - 6, ih - 6, 8, 8),
-        _ => return,
-    };
-    let (left, top) = (margin + cx - rw / 2, margin + cy - rh / 2);
-    let (right, bottom) = (left + rw, top + rh);
-    let radius = 2;
-    for y in top..bottom {
-        for x in left..right {
-            let qx = if x < left + radius {
-                left + radius - x
-            } else if x > right - radius {
-                x - (right - radius)
-            } else {
-                0
-            };
-            let qy = if y < top + radius {
-                top + radius - y
-            } else if y > bottom - radius {
-                y - (bottom - radius)
-            } else {
-                0
-            };
-            if qx * qx + qy * qy <= radius * radius && x >= 0 && x < w {
-                let i = ((y * w + x) * 4) as usize;
-                pixels[i..i + 4].copy_from_slice(&[0, 190, 207, 230]);
-            }
-        }
     }
 }
 
 /// Shows `bgra` (w x h, top-down) at the capture position, clamped into the
 /// work area. The window owns itself from here on.
-pub unsafe fn show(
-    rect: RECT,
-    w: i32,
-    h: i32,
-    bgra: &[u8],
-    border: PinBorder,
-    line_color: u32,
-) -> Result<()> {
+pub unsafe fn show(rect: RECT, w: i32, h: i32, bgra: &[u8], style: Style) -> Result<()> {
     ensure!(w > 0 && h > 0, "nothing to pin");
     ensure!(
         bgra.len() >= (w as usize) * (h as usize) * 4,
@@ -275,7 +238,7 @@ pub unsafe fn show(
     } else {
         rect
     };
-    let m = margin(border);
+    let m = margin(style.border);
     let (win_w, win_h) = fit(
         w,
         h,
@@ -313,13 +276,9 @@ pub unsafe fn show(
         old,
         w,
         h,
-        border,
-        line_color,
+        style,
         margin: m,
         drag: None,
-        hover: 0,
-        hover_pt: POINT::default(),
-        tracking: false,
     }));
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
@@ -390,7 +349,7 @@ unsafe fn render(hwnd: HWND) -> Result<()> {
     let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, (w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            let p = band_pixel(x, y, w, h, m, pin.border, pin.line_color);
+            let p = band_pixel(x, y, w, h, m, pin.style);
             let i = ((y * w + x) * 4) as usize;
             pixels[i..i + 4].copy_from_slice(&p);
         }
@@ -418,15 +377,6 @@ unsafe fn render(hwnd: HWND) -> Result<()> {
         for x in m..m + iw {
             pixels[((y * w + x) * 4 + 3) as usize] = 255;
         }
-    }
-    if pin.drag.is_none() && pin.hover != 0 {
-        let mut wr = RECT::default();
-        let _ = GetWindowRect(hwnd, &mut wr);
-        let local = POINT {
-            x: pin.hover_pt.x - wr.left - m,
-            y: pin.hover_pt.y - wr.top - m,
-        };
-        paint_grip(&mut pixels[..], w, m, iw, ih, pin.hover, local);
     }
     let size = SIZE { cx: w, cy: h };
     let origin = POINT { x: 0, y: 0 };
@@ -568,38 +518,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 );
                 return LRESULT(0);
             }
-            let side = edge_at(image_rect(hwnd), pt).unwrap_or(0);
-            let changed = side != (*raw).hover
-                || (side != 0 && ((*raw).hover_pt.y - pt.y).abs() >= 2
-                    || ((*raw).hover_pt.x - pt.x).abs() >= 2);
-            if !(*raw).tracking && side != 0 {
-                let mut track = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                (*raw).tracking = TrackMouseEvent(&mut track).is_ok();
-            }
-            if changed {
-                (*raw).hover = side;
-                (*raw).hover_pt = pt;
-                if let Err(e) = render(hwnd) {
-                    crate::logline(&format!("warn: pin hover render failed: {e:#}"));
-                }
-            }
-            LRESULT(0)
-        }
-        WM_MOUSELEAVE => {
-            if let Some(raw) = pin_of(hwnd) {
-                (*raw).tracking = false;
-                if (*raw).hover != 0 {
-                    (*raw).hover = 0;
-                    if let Err(e) = render(hwnd) {
-                        crate::logline(&format!("warn: pin hover render failed: {e:#}"));
-                    }
-                }
-            }
             LRESULT(0)
         }
         WM_SETCURSOR => {
@@ -653,12 +571,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 #[cfg(test)]
 mod tests {
-    use super::{band_pixel, edge_at, fit, lock_aspect, margin, paint_grip, GRIP};
+    use super::{band_pixel, edge_at, fit, lock_aspect, margin, Style};
     use crate::config::PinBorder;
     use windows::Win32::Foundation::{POINT, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        HTBOTTOMRIGHT, HTLEFT, HTRIGHT, WMSZ_BOTTOM, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT,
-        WMSZ_TOP,
+        HTBOTTOMRIGHT, HTLEFT, WMSZ_BOTTOM, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
     };
 
     #[test]
@@ -721,8 +638,8 @@ mod tests {
         let tiny = RECT {
             left: 0,
             top: 0,
-            right: 3 * GRIP,
-            bottom: 3 * GRIP,
+            right: 18,
+            bottom: 18,
         };
         assert_eq!(edge_at(tiny, POINT { x: 1, y: 1 }), None);
     }
@@ -731,46 +648,34 @@ mod tests {
     fn pin_edge_modes_paint_hatch_line_or_nothing() {
         let m = margin(PinBorder::Hatch);
         let (w, h) = (2 * m + 100, 2 * m + 80);
+        let style = |border, line_color| Style {
+            border,
+            line_color,
+            hatch_color: 0xffff00,
+        };
+        let hatch = style(PinBorder::Hatch, 0);
         // The capture area is left clear for StretchBlt.
+        assert_eq!(band_pixel(m + 10, m + 10, w, h, m, hatch), [0, 0, 0, 0]);
+        // Strong outline next to the image, translucent yellow hatch outside.
         assert_eq!(
-            band_pixel(m + 10, m + 10, w, h, m, PinBorder::Hatch, 0),
-            [0, 0, 0, 0]
-        );
-        // Strong outline next to the image, translucent cyan hatch outside it.
-        assert_eq!(
-            band_pixel(m - 1, m + 20, w, h, m, PinBorder::Hatch, 0),
+            band_pixel(m - 1, m + 20, w, h, m, hatch),
             [0, 180, 180, 180]
         );
-        assert_eq!(
-            band_pixel(2, m + 19, w, h, m, PinBorder::Hatch, 0),
-            [0, 0, 0, 0]
-        );
-        assert_eq!(
-            band_pixel(1, m + 19, w, h, m, PinBorder::Hatch, 0),
-            [0, 110, 110, 110]
-        );
+        assert_eq!(band_pixel(2, m + 19, w, h, m, hatch), [0, 0, 0, 0]);
+        assert_eq!(band_pixel(1, m + 19, w, h, m, hatch), [0, 110, 110, 110]);
         // Line mode honours the configured colour at full opacity.
         let lm = margin(PinBorder::Line);
         assert_eq!(
-            band_pixel(lm - 1, lm + 20, w, h, lm, PinBorder::Line, 0xff8800),
+            band_pixel(lm - 1, lm + 20, w, h, lm, style(PinBorder::Line, 0xff8800)),
             [0x00, 0x88, 0xff, 255]
         );
         assert_eq!(
-            band_pixel(0, lm + 20, w, h, lm, PinBorder::Line, 0),
+            band_pixel(0, lm + 20, w, h, lm, style(PinBorder::Line, 0)),
             [0, 0, 0, 0]
         );
-        assert_eq!(band_pixel(0, 0, w, h, 0, PinBorder::None, 0), [0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn hover_grip_paints_cyan_only_for_an_edge() {
-        let (w, h, m, iw, ih) = (50, 50, 6, 38, 38);
-        let mut pixels = vec![0u8; (w * h * 4) as usize];
-        paint_grip(&mut pixels, w, m, iw, ih, HTRIGHT, POINT { x: 37, y: 9 });
-        let i = ((15 * w + 39) * 4) as usize;
-        assert_eq!(&pixels[i..i + 4], &[0, 190, 207, 230]);
-        let mut untouched = vec![0u8; (w * h * 4) as usize];
-        paint_grip(&mut untouched, w, m, iw, ih, 0, POINT { x: 37, y: 9 });
-        assert!(untouched.iter().all(|&b| b == 0));
+        assert_eq!(
+            band_pixel(0, 0, w, h, 0, style(PinBorder::None, 0)),
+            [0, 0, 0, 0]
+        );
     }
 }
