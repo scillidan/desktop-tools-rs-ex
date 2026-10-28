@@ -23,8 +23,16 @@ public static extern bool RegisterHotKey(System.IntPtr hWnd, int id, uint fsModi
 public static extern bool UnregisterHotKey(System.IntPtr hWnd, int id);
 '@
 $api = Add-Type -MemberDefinition $sig -Name User32Probe -Namespace DtOcr -PassThru
-if ($api::RegisterHotKey([IntPtr]::Zero, 99, 0x0003, 0x53)) {
+$held = $false
+for ($i = 0; $i -lt 10; $i++) {
+    if (-not $api::RegisterHotKey([IntPtr]::Zero, 99, 0x0003, 0x53)) {
+        $held = $true
+        break
+    }
     $api::UnregisterHotKey([IntPtr]::Zero, 99) | Out-Null
+    Start-Sleep -Milliseconds 200
+}
+if (-not $held) {
     Write-Warning "ctrl+alt+s still FREE - dt-ocr hotkeys not registered?"
     exit 1
 }

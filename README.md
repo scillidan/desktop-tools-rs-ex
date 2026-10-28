@@ -1,12 +1,13 @@
 # desktop-tools-rs-ex
 
 Extended desktop tools (the heavy/experimental siblings of
-[desktop-tools-rs](../window-tools-rs)): OCR region frame with overlay mask,
+[desktop-tools-rs](../desktop-tools-rs)): OCR region frame with overlay mask,
 drag-select screen OCR, window/desktop recording, flameshot-window capture,
 window scaling.
 
-Status: planning. See [ROADMAP.md](ROADMAP.md) for phases and
-[PLAN.md](PLAN.md) for how to drive the project with an agent.
+Status: P0.1–P0.3 done (frame, overlay mask, reader); see
+[ROADMAP.md](ROADMAP.md) for what is left, and [AGENTS.md](AGENTS.md) for the
+conventions, the interaction model and the design decisions.
 
 Reference implementations:
 

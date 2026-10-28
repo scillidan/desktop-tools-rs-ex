@@ -10,12 +10,14 @@ mod capture;
 mod config;
 mod desktops;
 mod frame;
+mod host;
 mod hotkeys;
 mod icon;
 mod interaction;
 mod mask;
 mod ocr;
 mod overlay;
+mod pin;
 mod text;
 mod tray;
 
@@ -69,6 +71,8 @@ fn run() -> Result<()> {
     let mut cfg = config::parse(&text)?;
     mask::set_fill(cfg.mask_fill);
     mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
+    set_capture_dir(&cfg.capture_dir);
+    set_pin_style(cfg.pin_border, cfg.pin_line_color);
     logline(&format!(
         "config loaded from {} (frame {}x{})",
         cfg_path.display(),
@@ -76,9 +80,9 @@ fn run() -> Result<()> {
         cfg.frame_h
     ));
 
+    let host = host::Host::new()?;
     let mut frames = desktops::Frames::new(&cfg)?;
-    let frame = frames.all()[0];
-    let _tray = match tray::Tray::new(frame) {
+    let _tray = match tray::Tray::new(host.hwnd()) {
         Ok(tray) => Some(tray),
         Err(e) => {
             logline(&format!("warn: tray unavailable: {e:#}"));
@@ -86,14 +90,14 @@ fn run() -> Result<()> {
         }
     };
 
-    let mut hotkeys = register_hotkeys(frame, &cfg);
+    let mut hotkeys = register_hotkeys(host.hwnd(), &cfg);
     let mut mtime = dt_common::config::modified(&cfg_path);
 
     // 1 s timer drives config hot-reload (bindings only; the desktop-tools-rs
     // pattern — mtime polling, no notify dependency).
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{SetTimer, TIMERPROC};
-        let _ = SetTimer(Some(frame), 1, 1000, Some(TIMERPROC::None));
+        let _ = SetTimer(Some(host.hwnd()), 1, 1000, Some(TIMERPROC::None));
     }
 
     let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
@@ -119,8 +123,8 @@ fn run() -> Result<()> {
                 match reload(&cfg_path) {
                     Ok(new_cfg) => {
                         logline("config reloaded, hotkeys re-registered");
-                        hotkeys.unregister_all(frame);
-                        hotkeys = register_hotkeys(frame, &new_cfg);
+                        hotkeys.unregister_all(host.hwnd());
+                        hotkeys = register_hotkeys(host.hwnd(), &new_cfg);
                         for &current in frames.all() {
                             unsafe {
                                 frame::set_prefs(
@@ -134,6 +138,8 @@ fn run() -> Result<()> {
                             };
                         }
                         mask::set_fill(new_cfg.mask_fill);
+                        set_capture_dir(&new_cfg.capture_dir);
+                        set_pin_style(new_cfg.pin_border, new_cfg.pin_line_color);
                         mask::set_style(
                             new_cfg.mask_font.clone(),
                             new_cfg.mask_size,
@@ -150,7 +156,7 @@ fn run() -> Result<()> {
             windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
         }
     }
-    hotkeys.unregister_all(frame);
+    hotkeys.unregister_all(host.hwnd());
     unsafe { windows::Win32::System::Com::CoUninitialize() };
     logline("message loop exited");
     Ok(())
@@ -175,6 +181,20 @@ fn reload(cfg_path: &std::path::Path) -> Result<config::Config> {
 }
 
 fn dispatch(action: Action, frame: HWND) {
+    // Drawing replaces the old region, so hide it instead of flashing it; every
+    // other command summons a frame that was closed from the taskbar.
+    unsafe {
+        match action {
+            Action::Draw => {
+                frame::hide(frame);
+                mask::dismiss();
+            }
+            // The pin only uses a frame that is already on screen; bringing a
+            // hidden one back would pin the wrong thing.
+            Action::PinShot => {}
+            _ => frame::ensure_visible(frame),
+        }
+    }
     match action {
         Action::Draw => {
             if let Err(e) = unsafe { overlay::begin() } {
@@ -200,7 +220,131 @@ fn dispatch(action: Action, frame: HWND) {
                 }
             }
         }
+        // Frame the window the user is looking at: the frame becomes the region
+        // for OCR/capture without a manual drag.
+        Action::FrameWindow => match unsafe { capture::window_target() } {
+            Ok(rect) => unsafe {
+                mask::dismiss();
+                frame::place(frame, frame::rect_of(rect));
+                frame::to_move(frame);
+                logline(&format!("frame: window at {rect:?}"));
+            },
+            Err(e) => logline(&format!("frame window failed: {e:#}")),
+        },
+        // Pin what the frame covers; without a frame, pin the focused window.
+        Action::PinShot => {
+            let r = unsafe {
+                match frame::visible_rect(frame) {
+                    Some(rect) => {
+                        // Hide first: our own border must not be in the image.
+                        frame::hide(frame);
+                        let r = capture::pin_rect(rect, pin_border(), pin_line_color());
+                        if r.is_err() {
+                            frame::ensure_visible(frame);
+                        }
+                        r
+                    }
+                    None => capture::pin_window(pin_border(), pin_line_color()),
+                }
+            };
+            if let Err(e) = r {
+                logline(&format!("pin shot failed: {e:#}"));
+            }
+        }
     }
+}
+
+/// Focused-frame Ctrl+Shift+S: straight to `[capture] dir`.
+pub(crate) fn frame_quick_save(frame: HWND) {
+    if let Err(e) = unsafe { capture::save_frame(frame, &capture_dir()) } {
+        logline(&format!("save frame failed: {e:#}"));
+    }
+}
+
+/// Focused-frame Ctrl+S: pick the folder first, then save. A modal dialog
+/// leaves an animation behind, so let it fade before grabbing.
+pub(crate) fn frame_save_as(frame: HWND) {
+    let dir = match unsafe { capture::choose_dir(frame) } {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return,
+        Err(e) => {
+            logline(&format!("folder picker failed: {e:#}"));
+            return;
+        }
+    };
+    std::thread::sleep(std::time::Duration::from_millis(220));
+    if let Err(e) = unsafe { capture::save_frame(frame, &dir.to_string_lossy()) } {
+        logline(&format!("save frame failed: {e:#}"));
+    }
+}
+
+pub(crate) fn frame_copy(frame: HWND) {
+    if let Err(e) = unsafe { capture::copy_frame(frame) } {
+        logline(&format!("copy frame failed: {e:#}"));
+    }
+}
+
+pub(crate) fn frame_pin(frame: HWND) {
+    let r = unsafe {
+        match frame::visible_rect(frame) {
+            Some(rect) => {
+                frame::hide(frame);
+                let r = capture::pin_rect(rect, pin_border(), pin_line_color());
+                if r.is_err() {
+                    frame::ensure_visible(frame);
+                }
+                r
+            }
+            None => return,
+        }
+    };
+    if let Err(e) = r {
+        logline(&format!("pin frame failed: {e:#}"));
+    }
+}
+
+static CAPTURE_DIR: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn capture_dir() -> String {
+    CAPTURE_DIR
+        .lock()
+        .map(|d| d.clone())
+        .unwrap_or_else(|e| e.into_inner().clone())
+}
+
+pub fn set_capture_dir(dir: &str) {
+    if let Ok(mut d) = CAPTURE_DIR.lock() {
+        *d = dir.to_string();
+    }
+}
+
+static PIN_BORDER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static PIN_LINE_COLOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn set_pin_style(border: config::PinBorder, line_color: u32) {
+    use config::PinBorder;
+    use std::sync::atomic::Ordering::SeqCst;
+    PIN_BORDER.store(
+        match border {
+            PinBorder::Hatch => 0,
+            PinBorder::Line => 1,
+            PinBorder::None => 2,
+        },
+        SeqCst,
+    );
+    PIN_LINE_COLOR.store(line_color, SeqCst);
+}
+
+fn pin_border() -> config::PinBorder {
+    match PIN_BORDER.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => config::PinBorder::Line,
+        2 => config::PinBorder::None,
+        _ => config::PinBorder::Hatch,
+    }
+}
+
+fn pin_line_color() -> u32 {
+    PIN_LINE_COLOR.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 static FRAME_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);

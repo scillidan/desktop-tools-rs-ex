@@ -131,7 +131,7 @@ mod tests {
     const RESIZE: [Mode; 3] = [Mode::Input, Mode::Drag, Mode::Tune];
 
     #[test]
-    fn mode_hotkeys_are_absolute_and_pin_never_toggles_off() {
+    fn mode_hotkeys_are_absolute_and_pin_toggles_with_move() {
         for from in [
             Mode::Move,
             Mode::Pinned,
@@ -140,7 +140,14 @@ mod tests {
             Mode::Tune,
         ] {
             assert_eq!(transition(from, Event::MoveHotkey), Mode::Move);
-            assert_eq!(transition(from, Event::PinHotkey), Mode::Pinned);
+            assert_eq!(
+                transition(from, Event::PinHotkey),
+                if from == Mode::Pinned {
+                    Mode::Move
+                } else {
+                    Mode::Pinned
+                }
+            );
             assert_eq!(
                 transition(from, Event::ResizeHotkey { first_entry: false }),
                 if from.is_resize() {

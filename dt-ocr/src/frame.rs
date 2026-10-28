@@ -215,7 +215,7 @@ pub unsafe fn create(
     let resource = windows::core::PCWSTR::from_raw(std::ptr::without_provenance(1));
     let app_icon = LoadIconW(Some(instance), resource).unwrap_or_default();
     let wc = WNDCLASSW {
-        style: WNDCLASS_STYLES(0),
+        style: Default::default(),
         lpfnWndProc: Some(wndproc),
         cbClsExtra: 0,
         cbWndExtra: 0,
@@ -409,6 +409,16 @@ pub unsafe fn begin_spec(hwnd: HWND) {
     let _ = SetFocus(Some(hwnd));
 }
 
+/// The frame's screen rect, when it is actually on screen.
+pub unsafe fn visible_rect(hwnd: HWND) -> Option<RECT> {
+    if !IsWindowVisible(hwnd).as_bool() {
+        return None;
+    }
+    let mut r = RECT::default();
+    GetWindowRect(hwnd, &mut r).ok()?;
+    (r.right > r.left && r.bottom > r.top).then_some(r)
+}
+
 /// Capture feedback: flash the border cyan once (timer 4 clears it).
 pub unsafe fn flash_capture(hwnd: HWND) {
     if !IsWindowVisible(hwnd).as_bool() {
@@ -535,6 +545,19 @@ unsafe fn switch_tune(hwnd: HWND, field: TuneField) {
     set_mode(hwnd, transition(s.mode, Event::TuneKey));
 }
 
+/// Closing the frame hides it; any command summons it back without stealing
+/// focus.
+pub unsafe fn ensure_visible(hwnd: HWND) {
+    if !IsWindowVisible(hwnd).as_bool() {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+/// Hides the frame while a new region is drawn; `place` shows it again.
+pub unsafe fn hide(hwnd: HWND) {
+    let _ = ShowWindow(hwnd, SW_HIDE);
+}
+
 /// Moves/sizes the frame to a screen rect (from the draw overlay or resize).
 /// Any in-progress size input is discarded: a freshly placed frame starts
 /// in the plain draggable state.
@@ -551,6 +574,10 @@ pub unsafe fn place(hwnd: HWND, rect: Rect) {
     )
     .ok();
     let _ = InvalidateRect(Some(hwnd), None, false);
+    // Drawing and ctrl+alt+w enter the same focused Move state: Esc and the
+    // Ctrl+S/C/P actions must work regardless of how the frame was placed.
+    let _ = SetForegroundWindow(hwnd);
+    let _ = SetFocus(Some(hwnd));
     logline(&format!("frame placed: {rect:?}"));
 }
 
@@ -666,13 +693,15 @@ unsafe fn set_edge_cursor(code: isize) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // Shell_NotifyIconW sends this straight to the window procedure; it does
-    // not pass through the main GetMessage loop.
-    if msg == crate::tray::WM_TRAY {
-        crate::tray::handle(hwnd, lparam);
-        return LRESULT(0);
-    }
     match msg {
+        // Closing the frame (taskbar Close, Alt+F4) hides it instead of
+        // destroying it: the process, its hotkeys and its tray icon are the
+        // daemon and must outlive any frame.
+        WM_CLOSE => {
+            crate::mask::dismiss();
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            LRESULT(0)
+        }
         WM_DESTROY => {
             drop(Box::from_raw(
                 GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FrameState
@@ -791,8 +820,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         // A queued WM_PAINT can starve behind hover hit-tests after a modal
-        // drag, so repaint both windows synchronously on release.
+        // drag, so repaint both windows synchronously on release. The system
+        // move/size loop is foreign input (desktop-tools-rs rectangle): stop
+        // our own captured border drag and land back in plain Move.
+        WM_ENTERSIZEMOVE => {
+            if let Some(s) = state_opt(hwnd) {
+                s.mouse_drag = None;
+            }
+            let _ = ReleaseCapture();
+            LRESULT(0)
+        }
         WM_EXITSIZEMOVE => {
+            if let Some(s) = state_opt(hwnd) {
+                if s.mode.is_resize() {
+                    set_mode(hwnd, Mode::Move);
+                }
+            }
             redraw_now(hwnd);
             LRESULT(0)
         }
@@ -995,7 +1038,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 Mode::Move => {
                     let step = key_step();
+                    let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+                    let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
                     match key {
+                        // Esc on a focused Move frame puts it away; the daemon
+                        // keeps running and any command brings it back.
+                        VK_ESCAPE => {
+                            crate::mask::dismiss();
+                            hide(hwnd);
+                        }
+                        _ if ctrl && shift && ch == 's' => crate::frame_quick_save(hwnd),
+                        _ if ctrl && ch == 's' => crate::frame_save_as(hwnd),
+                        _ if ctrl && ch == 'c' => crate::frame_copy(hwnd),
+                        _ if ctrl && ch == 'p' => crate::frame_pin(hwnd),
                         VK_LEFT => nudge(hwnd, -step, 0),
                         VK_RIGHT => nudge(hwnd, step, 0),
                         VK_UP => nudge(hwnd, 0, -step),
@@ -1068,6 +1123,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
                         );
                     }
+                }
+                // A foreign tool (desktop-tools-rs rectangle) can move or
+                // resize the frame: nothing invalidates a layered window, so
+                // the old border stays on screen next to the new one.
+                if s.mouse_drag.is_none() {
+                    redraw_now(hwnd);
                 }
             }
             r

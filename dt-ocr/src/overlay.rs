@@ -1,6 +1,7 @@
 //! Draw-select overlay: a full-virtual-screen, topmost, hollow, crosshair
-//! window. Left-drag paints a rubber-band rect; on release the frame window
-//! is placed there. Esc (or a too-small drag) cancels. The band is a plain
+//! window. Left-drag paints a rubber-band rect; on release the rect either
+//! places the frame (`Use::Frame`) or is handed to the caller to capture
+//! (`Use::Snip`). Esc (or a too-small drag) cancels. The band is a plain
 //! border — shortcut: no per-pixel alpha blending, a border is enough to
 //! see the selection.
 
@@ -43,7 +44,7 @@ fn virtual_screen() -> RECT {
 }
 
 /// Creates (or recreates) the overlay and takes over the mouse until the
-/// drag finishes; the selected rect goes straight to the frame window.
+/// drag finishes; the selected rect goes to the frame window.
 pub unsafe fn begin() -> Result<()> {
     if IsWindow(Some(overlay_hwnd())).as_bool() {
         let _ = DestroyWindow(overlay_hwnd());
@@ -123,6 +124,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 x: (lparam.0 & 0xffff) as i32,
                 y: ((lparam.0 >> 16) & 0xffff) as i32,
             };
+            logline(&format!("draw: anchor at ({},{})", pt.x, pt.y));
             s.start = Some(pt);
             s.cur = pt;
             let _ = SetCapture(hwnd);

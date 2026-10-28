@@ -1,7 +1,7 @@
-# dt-ocr configuration. This template lives at the repo root; rebuild_ex.ps1
+# dt-ocr configuration. This template lives at the repo root; tools\rebuild.ps1
 # copies it next to dt-ocr.exe on every rebuild. The running exe reads
 # dt-ocr.toml from its own directory. Bad values fall back to defaults with a
-# warning in dt-ocr.log; hotkey bindings arrive with the P0.2 frame window.
+# warning in dt-ocr.log.
 
 [frame]
 width     = 800   # default frame width, px (16..=20000)
@@ -34,6 +34,19 @@ layout = "overlay"
 font = "Sarasa Term SC Nerd"
 size = 10
 
+# Ctrl+Shift+S on a focused Move frame saves its region here, then closes the
+# frame. Ctrl+S asks for a folder each time. Pinning never writes a file.
+# `%VAR%` expands; empty makes the quick-save key report an error.
+[capture]
+dir = "%USERPROFILE%\\Pictures\\dt-ocr"
+
+# Pinned-image edge. "hatch" = translucent cyan diagonal shadow (6 px, the
+# default), "line" = one solid pixel using line-color, "none" = no edge.
+# Hovering an edge shows a cyan grip and the resize cursor in every mode.
+[pin]
+border = "hatch"
+line-color = "black"   # colour name or #RRGGBB; only used by border = "line"
+
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
 # NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows
 # defaults, but `pin` uses a three-modifier combo so plain Ctrl+T still reaches
@@ -43,6 +56,9 @@ draw    = "ctrl+alt+d"   # drag a rect on screen to place the frame (Esc cancels
 resize  = "ctrl+alt+s"   # enter/reset resize; unlocks pin; i=input, w/h=tune
 pin     = "ctrl+shift+alt+t" # toggle Pin (blue, click-through) / Move (cyan)
 capture = "ctrl+enter"   # copy the pixels under the frame; never changes mode
+frame_window = "ctrl+alt+w"  # drop the frame on the focused window (no capture)
+pin_shot = "ctrl+alt+p"  # quick pin (no file/clipboard); Ctrl+P = same for the frame
+# Focused Move frame: Esc closes; Ctrl+S saves+closes; Ctrl+C copies+closes.
 move    = "ctrl+alt+m"   # Move mode (cyan); unlocks pin
 toggle  = "win+shift+o"  # show/hide the OCR layer (Win+O is reserved by Windows)
 

@@ -39,7 +39,22 @@ pub struct Config {
     pub mask_font: String,
     /// Mask text size in points; `Auto` keeps the per-line source height.
     pub mask_size: MaskSize,
+    /// Directory for saved captures (env vars expanded); empty = clipboard
+    /// only, no file.
+    pub capture_dir: String,
+    /// Pin edge decoration: translucent cyan hatch (default), a solid line,
+    /// or nothing.
+    pub pin_border: PinBorder,
+    /// `line` border colour, 0xRRGGBB (default black).
+    pub pin_line_color: u32,
     pub bindings: Bindings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinBorder {
+    Hatch,
+    Line,
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +83,8 @@ pub struct Bindings {
     pub resize: Combo,
     pub pin: Combo,
     pub capture: Combo,
+    pub frame_window: Combo,
+    pub pin_shot: Combo,
     pub r#move: Combo,
     pub toggle: Combo,
 }
@@ -79,16 +96,20 @@ pub enum Action {
     Resize,
     Pin,
     Capture,
+    FrameWindow,
+    PinShot,
     Move,
     Toggle,
 }
 
 impl Action {
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 8] = [
         Action::Draw,
         Action::Resize,
         Action::Pin,
         Action::Capture,
+        Action::FrameWindow,
+        Action::PinShot,
         Action::Move,
         Action::Toggle,
     ];
@@ -98,6 +119,8 @@ impl Action {
             Action::Resize => "resize",
             Action::Pin => "pin",
             Action::Capture => "capture",
+            Action::FrameWindow => "frame_window",
+            Action::PinShot => "pin_shot",
             Action::Move => "move",
             Action::Toggle => "toggle",
         }
@@ -110,6 +133,8 @@ impl Action {
             Action::Resize => "ctrl+alt+s".parse().unwrap(),
             Action::Pin => "ctrl+shift+alt+t".parse().unwrap(),
             Action::Capture => "ctrl+enter".parse().unwrap(),
+            Action::FrameWindow => "ctrl+alt+w".parse().unwrap(),
+            Action::PinShot => "ctrl+alt+p".parse().unwrap(),
             Action::Move => "ctrl+alt+m".parse().unwrap(),
             // Win+O is reserved by Windows (orientation lock; RegisterHotKey
             // fails with 1409), Win+Shift+O is free.
@@ -122,6 +147,8 @@ impl Action {
             Action::Resize => b.resize,
             Action::Pin => b.pin,
             Action::Capture => b.capture,
+            Action::FrameWindow => b.frame_window,
+            Action::PinShot => b.pin_shot,
             Action::Move => b.r#move,
             Action::Toggle => b.toggle,
         }
@@ -132,6 +159,8 @@ impl Action {
             Action::Resize => b.resize = c,
             Action::Pin => b.pin = c,
             Action::Capture => b.capture = c,
+            Action::FrameWindow => b.frame_window = c,
+            Action::PinShot => b.pin_shot = c,
             Action::Move => b.r#move = c,
             Action::Toggle => b.toggle = c,
         }
@@ -145,6 +174,8 @@ impl Default for Bindings {
             resize: Combo::default(),
             pin: Combo::default(),
             capture: Combo::default(),
+            frame_window: Combo::default(),
+            pin_shot: Combo::default(),
             r#move: Combo::default(),
             toggle: Combo::default(),
         };
@@ -169,9 +200,33 @@ impl Default for Config {
             mask_layout: MaskLayout::Overlay,
             mask_font: "Sarasa Term SC Nerd".to_string(),
             mask_size: MaskSize::Pt(10),
+            capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
+            pin_border: PinBorder::Hatch,
+            pin_line_color: 0,
             bindings: Bindings::default(),
         }
     }
+}
+
+/// Colour names plus `#RRGGBB`, enough for a border setting.
+fn parse_color(s: &str) -> Option<u32> {
+    let named = match s.to_ascii_lowercase().as_str() {
+        "black" => Some(0x000000),
+        "white" => Some(0xffffff),
+        "red" => Some(0xff0000),
+        "green" => Some(0x00ff00),
+        "blue" => Some(0x0000ff),
+        "cyan" => Some(0x00ffff),
+        "yellow" => Some(0xffff00),
+        "magenta" => Some(0xff00ff),
+        "gray" | "grey" => Some(0x808080),
+        _ => None,
+    };
+    named.or_else(|| {
+        s.strip_prefix('#')
+            .filter(|h| h.len() == 6)
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+    })
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -289,12 +344,50 @@ pub fn parse(text: &str) -> Result<Config> {
             None => eprintln!("warn: [mask] must be a table; using defaults"),
         }
     }
+    if let Some(capture) = table.get("capture") {
+        match capture.as_table() {
+            Some(t) => {
+                if let Some(v) = t.get("dir") {
+                    match v.as_str() {
+                        Some(s) => cfg.capture_dir = s.to_string(),
+                        None => eprintln!("warn: capture.dir must be a string; using the default"),
+                    }
+                }
+            }
+            None => eprintln!("warn: [capture] must be a table; using defaults"),
+        }
+    }
+    if let Some(pin) = table.get("pin") {
+        match pin.as_table() {
+            Some(t) => {
+                if let Some(v) = t.get("border") {
+                    match v.as_str() {
+                        Some("hatch") => cfg.pin_border = PinBorder::Hatch,
+                        Some("line") => cfg.pin_border = PinBorder::Line,
+                        Some("none") => cfg.pin_border = PinBorder::None,
+                        _ => eprintln!(
+                            "warn: pin.border must be \"hatch\", \"line\" or \"none\"; using hatch"
+                        ),
+                    }
+                }
+                if let Some(v) = t.get("line-color") {
+                    match v.as_str().and_then(parse_color) {
+                        Some(c) => cfg.pin_line_color = c,
+                        None => eprintln!(
+                            "warn: pin.line-color must be a colour name or #RRGGBB; using black"
+                        ),
+                    }
+                }
+            }
+            None => eprintln!("warn: [pin] must be a table; using defaults"),
+        }
+    }
     if let Some(binds) = table.get("bindings") {
         match binds.as_table() {
             Some(t) => {
                 for (name, value) in t {
                     let Some(action) = Action::ALL.iter().find(|a| a.name() == name) else {
-                        eprintln!("warn: unknown binding `{name}` (known: draw, resize, pin, capture, move, toggle); skipped");
+                        eprintln!("warn: unknown binding `{name}` (known: draw, resize, pin, capture, window, move, toggle); skipped");
                         continue;
                     };
                     match value.as_str() {
@@ -334,9 +427,27 @@ mod tests {
                 mask_layout: MaskLayout::Overlay,
                 mask_font: "Sarasa Term SC Nerd".to_string(),
                 mask_size: MaskSize::Pt(10),
+                capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
+                pin_border: PinBorder::Hatch,
+                pin_line_color: 0,
                 bindings: Bindings::default(),
             }
         );
+    }
+
+    #[test]
+    fn pin_border_and_line_colour_parse() {
+        let cfg = parse("[pin]\nborder = \"none\"\n").unwrap();
+        assert_eq!(cfg.pin_border, PinBorder::None);
+        let cfg = parse("[pin]\nborder = \"line\"\nline-color = \"#ff8800\"\n").unwrap();
+        assert_eq!(cfg.pin_border, PinBorder::Line);
+        assert_eq!(cfg.pin_line_color, 0xff8800);
+        let cfg = parse("[pin]\nborder = \"bogus\"\nline-color = \"nope\"\n").unwrap();
+        assert_eq!(cfg.pin_border, PinBorder::Hatch);
+        assert_eq!(cfg.pin_line_color, 0);
+        assert_eq!(parse_color("Black"), Some(0));
+        assert_eq!(parse_color("#00FF00"), Some(0x00ff00));
+        assert_eq!(parse_color("#12345"), None);
     }
 
     #[test]
