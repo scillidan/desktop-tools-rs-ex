@@ -70,12 +70,13 @@ in `AGENTS.md`; this file is only what is left to build.
   `pin_no_frame_test.ps1` (3), `pin_border_modes_test.ps1` (2),
   `frame_focus_test.ps1` + the `pin` unit tests.
 - Done: cyan capture flash; `[pin] border = hatch | line | none` (hatch is a
-  6 px translucent diagonal shadow, `hatch-color` yellow by default; line uses
+  6 px translucent diagonal shadow, `hatch-color` cyan by default; line uses
   `line-color`), and hovering an edge shows only the resize-arrow cursor. Pin
   resize is our own mouse capture, not `WS_THICKFRAME` (the NC border ate
   pixels; layered resize ghosted). No frame shadow.
-- Done: tray menu is our own owner-drawn popup (not Win11 `TrackPopupMenu`),
-  and hiding a frame also hides its status strip. Single-instance mutex.
+- Done: tray menu uses the native `TrackPopupMenu` flow from desktop-tools-rs,
+  with a foreground host owner and `WM_NULL` cleanup. Hiding a frame also hides
+  its status strip; startup creates no visible frame. Single-instance mutex.
 - Next: a floating action bar after a selection (copy / save / pin / flameshot /
   record on one rect), per-desktop pinning, and the bridges (flameshot `gui`,
   the recording tool once P1.3 lands). Flameshot stays the better free-form
