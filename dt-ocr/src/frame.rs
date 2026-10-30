@@ -250,11 +250,12 @@ pub unsafe fn create(
             b: h,
         },
     );
+    // Start hidden: only a draw/window/mode command should reveal the frame.
     let hwnd = CreateWindowExW(
         FRAME_EX_STYLE,
         class,
         w!("dt-ocr"),
-        WS_POPUP | WS_VISIBLE,
+        WS_POPUP,
         pos.l,
         pos.t,
         pos.w(),

@@ -1,5 +1,5 @@
 //! Pinned screenshots: a borderless always-on-top layered window showing the
-//! captured image, edged by translucent yellow hatch (or a solid line, or
+//! captured image, edged by translucent cyan hatch (or a solid line, or
 //! nothing). Interior drag uses the system move loop; edge drag is our own
 //! aspect-locked resize, so there is no non-client border to eat pixels or
 //! leave ghosts. Hovering an edge shows only the resize-arrow cursor.
@@ -53,7 +53,7 @@ impl Style {
     pub const DEFAULT: Self = Self {
         border: PinBorder::Hatch,
         line_color: 0,
-        hatch_color: 0xffff00,
+        hatch_color: 0x00ffff,
     };
 }
 
@@ -651,18 +651,18 @@ mod tests {
         let style = |border, line_color| Style {
             border,
             line_color,
-            hatch_color: 0xffff00,
+            hatch_color: 0x00ffff,
         };
         let hatch = style(PinBorder::Hatch, 0);
         // The capture area is left clear for StretchBlt.
         assert_eq!(band_pixel(m + 10, m + 10, w, h, m, hatch), [0, 0, 0, 0]);
-        // Strong outline next to the image, translucent yellow hatch outside.
+        // Strong outline next to the image, translucent cyan hatch outside.
         assert_eq!(
             band_pixel(m - 1, m + 20, w, h, m, hatch),
-            [0, 180, 180, 180]
+            [180, 180, 0, 180]
         );
         assert_eq!(band_pixel(2, m + 19, w, h, m, hatch), [0, 0, 0, 0]);
-        assert_eq!(band_pixel(1, m + 19, w, h, m, hatch), [0, 110, 110, 110]);
+        assert_eq!(band_pixel(1, m + 19, w, h, m, hatch), [110, 110, 0, 110]);
         // Line mode honours the configured colour at full opacity.
         let lm = margin(PinBorder::Line);
         assert_eq!(

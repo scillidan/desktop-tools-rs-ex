@@ -87,7 +87,8 @@ fn notify_data(
 
 /// Called by the resident host window procedure for the shell's WM_TRAY callback.
 pub unsafe fn handle(hwnd: HWND, lparam: LPARAM) {
-    if matches!(lparam.0 as u32 & 0xffff, WM_RBUTTONUP | WM_CONTEXTMENU) {
-        crate::menu::show(hwnd);
+    if matches!(lparam.0 as u32 & 0xffff, WM_RBUTTONUP | WM_CONTEXTMENU) && crate::menu::show(hwnd)
+    {
+        PostQuitMessage(0);
     }
 }

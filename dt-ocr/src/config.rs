@@ -47,7 +47,7 @@ pub struct Config {
     pub pin_border: PinBorder,
     /// `line` border colour, 0xRRGGBB (default black).
     pub pin_line_color: u32,
-    /// `hatch` colour, 0xRRGGBB (default yellow).
+    /// `hatch` colour, 0xRRGGBB (default cyan).
     pub pin_hatch_color: u32,
     pub bindings: Bindings,
 }
@@ -205,7 +205,7 @@ impl Default for Config {
             capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
             pin_border: PinBorder::Hatch,
             pin_line_color: 0,
-            pin_hatch_color: 0xffff00,
+            pin_hatch_color: 0x00ffff,
             bindings: Bindings::default(),
         }
     }
@@ -385,7 +385,7 @@ pub fn parse(text: &str) -> Result<Config> {
                     match v.as_str().and_then(parse_color) {
                         Some(c) => cfg.pin_hatch_color = c,
                         None => eprintln!(
-                            "warn: pin.hatch-color must be a colour name or #RRGGBB; using yellow"
+                            "warn: pin.hatch-color must be a colour name or #RRGGBB; using cyan"
                         ),
                     }
                 }
@@ -441,7 +441,7 @@ mod tests {
                 capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
                 pin_border: PinBorder::Hatch,
                 pin_line_color: 0,
-                pin_hatch_color: 0xffff00,
+                pin_hatch_color: 0x00ffff,
                 bindings: Bindings::default(),
             }
         );
@@ -457,7 +457,7 @@ mod tests {
         let cfg = parse("[pin]\nborder = \"bogus\"\nline-color = \"nope\"\n").unwrap();
         assert_eq!(cfg.pin_border, PinBorder::Hatch);
         assert_eq!(cfg.pin_line_color, 0);
-        assert_eq!(cfg.pin_hatch_color, 0xffff00);
+        assert_eq!(cfg.pin_hatch_color, 0x00ffff);
         let cfg = parse("[pin]\nhatch-color = \"#ffaa00\"\n").unwrap();
         assert_eq!(cfg.pin_hatch_color, 0xffaa00);
         assert_eq!(parse_color("Black"), Some(0));

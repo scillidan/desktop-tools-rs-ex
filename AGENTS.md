@@ -92,7 +92,7 @@ SizeSpec input/tune, status strip; `interaction.rs` pure five-state machine;
 RegisterHotKey; `ocr.rs` capture → upscale → Windows OCR → line merge;
 `mask.rs` layered mask, overlay/reader rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
-Shell_NotifyIconW; `menu.rs` owner-drawn tray popup; `icon.rs`/`build.rs`
+Shell_NotifyIconW; `menu.rs` native tray popup; `icon.rs`/`build.rs`
 procedural icon.
 
 ## Capture sinks
@@ -127,7 +127,7 @@ A pinned shot is a borderless layered tool window: drag inside to move
 resize with the source aspect (`pin::lock_aspect`). Hovering an edge shows only
 the matching resize-arrow cursor (`WM_SETCURSOR`) — no painted grip blocks.
 `[pin] border` selects the edge: `hatch` (default, 6 px translucent diagonal
-shadow with a 1 px outline, `hatch-color` default yellow), `line` (1 px,
+shadow with a 1 px outline, `hatch-color` default cyan), `line` (1 px,
 `line-color` accepts names or `#RRGGBB`) or `none`.
 Do not bring back `WS_THICKFRAME`: its non-client border ate image pixels while
 shrinking, and a layered window was not invalidated during enlargement, leaving
@@ -174,16 +174,21 @@ an explorer restart silently removes the icon for the rest of the session.
 The process is a daemon; frames are disposable. `host.rs` owns a hidden
 `WS_EX_TOOLWINDOW` STATIC-style window that carries every `RegisterHotKey`, the
 tray icon and the 1 s config timer, because a destroyed window silently takes
-its hotkey and tray registrations with it. Its tray callback must be handled in
+its hotkey and tray registrations with it. Frames are created without
+`WS_VISIBLE`, so launching the daemon shows no frame or status strip; only a
+draw/window/mode command reveals one. Its tray callback must be handled in
 the host window *procedure*: the shell sends (`SendNotifyMessage`) rather than
 posts it, so it never appears in the `GetMessage` loop — handling it there made
 right-click do nothing. `WM_CLOSE` on a frame hides it and its status strip
 (mask dismissed) instead of destroying it; the next command calls
 `frame::ensure_visible` and the draw overlay re-shows it via `place`. Only the
-tray Quit item (or WM_QUIT) ends the process. The tray menu is our own
-owner-drawn popup (`menu.rs`), not `TrackPopupMenu`: the native Win11 menu
-stayed on screen and blocked the frame. Our popup closes on outside click,
-right-click, Esc or focus loss.
+tray Quit item (or WM_QUIT) ends the process. The tray menu is the native
+`TrackPopupMenu` popup used by desktop-tools-rs (`menu.rs`): `CreatePopupMenu`,
+one `AppendMenuW` row, the host foregrounded first, then
+`TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RETURNCMD | TPM_NONOTIFY`; after dismissal
+it posts `WM_NULL` and destroys the HMENU. That is the tray-icon/tray-rs flow,
+not a self-drawn Win11-style window, and the owner must be foreground or a
+popup can stay stuck on screen.
 
 A named mutex (`Local\dt-ocr.single`) makes the process single-instance: a
 second launch logs `another dt-ocr instance is already running; exiting` before
