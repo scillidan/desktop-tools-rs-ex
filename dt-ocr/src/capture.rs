@@ -495,7 +495,7 @@ fn wait_action(op: &IAsyncAction) -> Result<()> {
     }
 }
 
-unsafe fn write_png(path: &std::path::Path, w: u32, h: u32, bgra: &[u8]) -> Result<()> {
+pub(crate) unsafe fn write_png(path: &std::path::Path, w: u32, h: u32, bgra: &[u8]) -> Result<()> {
     let file = HSTRING::from(path.to_string_lossy().as_ref());
     let stream: IRandomAccessStream = wait_op(&FileRandomAccessStream::OpenAsync(
         &file,

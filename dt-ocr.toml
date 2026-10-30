@@ -11,13 +11,17 @@ work_area = true  # true = keep out of the taskbar; false = use the full monitor
 # font = "Cascadia Mono"  # status font (default Consolas; monospace recommended)
 
 [ocr]
+# auto = RapidOCR plus Tesseract Latin correction, with Windows OCR fallback.
+# rapid = RapidOCR only; tesseract = Tesseract only.
+engine = "auto"
 # Upscale the capture before recognition. 1 = native; 2-3 reads smaller,
 # tighter screen fonts much better (same idea as ShareX's "scale factor").
 # Automatically clamped down when the result would exceed the engine limit
 # or the memory budget. Hot-reloads; applies to the next capture.
 scale = 4
-# Recognizer language: "auto" (CJK pack first, then English) or a tag such
-# as "en", "zh". A missing pack falls back to auto with a warning.
+# Recognizer language: "auto" (RapidOCR mixed model, then Tesseract English
+# correction) or a tag such as "en", "zh". External engines must be installed;
+# auto falls back to the built-in Windows OCR when they are unavailable.
 language = "auto"
 
 [mask]

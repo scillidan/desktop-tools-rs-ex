@@ -90,6 +90,7 @@ fn run() -> Result<()> {
     let cfg_path = dt_common::config::exe_dir_file(config::CONFIG_NAME)?;
     let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
     let mut cfg = config::parse(&text)?;
+    ocr::set_engine(cfg.ocr_engine);
     mask::set_fill(cfg.mask_fill);
     mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
     set_capture_dir(&cfg.capture_dir);
@@ -155,6 +156,7 @@ fn run() -> Result<()> {
                 match reload(&cfg_path) {
                     Ok(new_cfg) => {
                         logline("config reloaded, hotkeys re-registered");
+                        ocr::set_engine(new_cfg.ocr_engine);
                         hotkeys.unregister_all(host.hwnd());
                         hotkeys = register_hotkeys(host.hwnd(), &new_cfg);
                         for &current in frames.all() {

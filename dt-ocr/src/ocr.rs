@@ -7,9 +7,13 @@
 //! this with the RapidOCR/Tesseract router; this module keeps the seam
 //! (`Word`, `Outcome`) so the router only swaps `recognize`.
 
+mod external;
+
+use crate::config::OcrBackend;
 use crate::logline;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use dt_common::layout::Rect;
+use std::sync::RwLock;
 use std::time::Duration;
 use windows::core::Interface;
 use windows::Foundation::AsyncStatus;
@@ -24,6 +28,16 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 /// Worker → UI thread: recognition finished, `lparam` is `Box<Outcome>`.
 pub const WM_OCR_DONE: u32 = WM_APP + 1;
+
+static ENGINE: RwLock<OcrBackend> = RwLock::new(OcrBackend::Auto);
+
+pub fn set_engine(engine: OcrBackend) {
+    *ENGINE.write().unwrap_or_else(|e| e.into_inner()) = engine;
+}
+
+fn engine() -> OcrBackend {
+    *ENGINE.read().unwrap_or_else(|e| e.into_inner())
+}
 
 /// One recognized word. `rect` is in mask-window client coordinates (the
 /// frame border is cropped out of the capture and the offset is added back).
@@ -86,9 +100,10 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
     ));
     let frame_addr = frame.0 as isize;
     let language = crate::frame::ocr_language(frame);
+    let backend = engine();
     let inv = 1.0 / scale as f32;
     std::thread::spawn(move || {
-        let words = recognize(w, h, &pixels, language.as_deref()).map(|lines| {
+        let words = recognize(w, h, &pixels, language.as_deref(), backend).map(|lines| {
             let mut words: Vec<Word> = lines.into_iter().flatten().collect();
             for word in &mut words {
                 let r = word.rect;
@@ -242,7 +257,65 @@ unsafe fn make_dib(screen: HDC, w: i32, h: i32) -> Result<(HBITMAP, *mut core::f
 /// two are merged line by line — CJK lines keep the zh result, Latin lines
 /// take the en result. At 3x upscale this is the difference between
 /// `pack 可 box` and `Pack my box`.
-fn recognize(w: i32, h: i32, bgra: &[u8], requested: Option<&str>) -> Result<Vec<Vec<Word>>> {
+fn recognize(
+    w: i32,
+    h: i32,
+    bgra: &[u8],
+    requested: Option<&str>,
+    backend: OcrBackend,
+) -> Result<Vec<Vec<Word>>> {
+    // The external engines receive PNG through WinRT's encoder too.
+    unsafe {
+        let _ = windows::Win32::System::WinRT::RoInitialize(
+            windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
+        );
+    }
+    let latin_requested = requested
+        .map(|lang| lang.to_ascii_lowercase().starts_with("en"))
+        .unwrap_or(false);
+    match backend {
+        OcrBackend::Rapid => external::rapid(w, h, bgra, requested),
+        OcrBackend::Tesseract => external::tesseract(w, h, bgra, requested),
+        OcrBackend::Auto if latin_requested => match external::tesseract(w, h, bgra, requested) {
+            Ok(lines) => Ok(lines),
+            Err(e) => {
+                logline(&format!(
+                    "warn: Tesseract failed ({e:#}); using Windows OCR"
+                ));
+                recognize_windows(w, h, bgra, requested)
+            }
+        },
+        OcrBackend::Auto => match external::rapid(w, h, bgra, requested) {
+            Ok(mut primary) => {
+                // Same merge policy as the old zh+en Windows pass: RapidOCR is
+                // primary, Tesseract only replaces lines that are mostly Latin.
+                if requested.is_none() && has_latin(&primary) {
+                    match external::tesseract(w, h, bgra, Some("en")) {
+                        Ok(en) if !en.is_empty() => {
+                            primary = merge_lines(&primary, &en);
+                            renumber(&mut primary);
+                            log_preview("ocr: merged text", &primary);
+                        }
+                        Ok(_) => {}
+                        Err(e) => logline(&format!("warn: Tesseract Latin pass skipped: {e:#}")),
+                    }
+                }
+                Ok(primary)
+            }
+            Err(e) => {
+                logline(&format!("warn: RapidOCR failed ({e:#}); using Windows OCR"));
+                recognize_windows(w, h, bgra, requested)
+            }
+        },
+    }
+}
+
+fn recognize_windows(
+    w: i32,
+    h: i32,
+    bgra: &[u8],
+    requested: Option<&str>,
+) -> Result<Vec<Vec<Word>>> {
     unsafe {
         // A fresh thread has no apartment yet; S_FALSE is fine, a different
         // apartment mode would be a bug here but not worth failing over.
@@ -276,12 +349,16 @@ fn recognize(w: i32, h: i32, bgra: &[u8], requested: Option<&str>) -> Result<Vec
         log_preview("ocr: text", &lines);
         // The en pass numbers its own lines; renumber the merged result so
         // the mask sees one contiguous reading order.
-        for (i, line) in lines.iter_mut().enumerate() {
-            for word in line {
-                word.line = i as u32;
-            }
-        }
+        renumber(&mut lines);
         Ok(lines)
+    }
+}
+
+fn renumber(lines: &mut [Vec<Word>]) {
+    for (i, line) in lines.iter_mut().enumerate() {
+        for word in line {
+            word.line = i as u32;
+        }
     }
 }
 

@@ -23,6 +23,9 @@ pub struct Config {
     /// call the same knob "scale factor"). Clamped down when the scaled
     /// image would exceed the engine's max dimension or the pixel budget.
     pub ocr_scale: u32,
+    /// OCR backend: auto = RapidOCR + Tesseract Latin correction, falling
+    /// back to Windows OCR when the external engine is unavailable.
+    pub ocr_engine: OcrBackend,
     /// Recognizer language tag (`zh`, `en`, `zh-Hans-CN`, ...). `None` =
     /// auto: prefer a CJK pack, then English. A tag that is not installed
     /// falls back to auto with a warning.
@@ -50,6 +53,13 @@ pub struct Config {
     /// `hatch` colour, 0xRRGGBB (default cyan).
     pub pin_hatch_color: u32,
     pub bindings: Bindings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OcrBackend {
+    Auto,
+    Rapid,
+    Tesseract,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,6 +207,7 @@ impl Default for Config {
             show_hint: true,
             font: None,
             ocr_scale: 4,
+            ocr_engine: OcrBackend::Auto,
             ocr_language: None,
             mask_fill: MaskFill::Lines,
             mask_layout: MaskLayout::Overlay,
@@ -286,6 +297,16 @@ pub fn parse(text: &str) -> Result<Config> {
     if let Some(ocr) = table.get("ocr") {
         match ocr.as_table() {
             Some(t) => {
+                if let Some(v) = t.get("engine") {
+                    match v.as_str() {
+                        Some("auto") => cfg.ocr_engine = OcrBackend::Auto,
+                        Some("rapid") => cfg.ocr_engine = OcrBackend::Rapid,
+                        Some("tesseract") => cfg.ocr_engine = OcrBackend::Tesseract,
+                        _ => eprintln!(
+                            "warn: ocr.engine must be \"auto\", \"rapid\" or \"tesseract\"; using auto"
+                        ),
+                    }
+                }
                 if let Some(v) = t.get("scale") {
                     match v.as_integer() {
                         Some(n) if (1..=4).contains(&n) => cfg.ocr_scale = n as u32,
@@ -422,6 +443,18 @@ mod tests {
     use dt_common::keys::Key;
 
     #[test]
+    fn parses_forced_ocr_engine() {
+        assert_eq!(
+            parse("[ocr]\nengine = \"rapid\"").unwrap().ocr_engine,
+            OcrBackend::Rapid
+        );
+        assert_eq!(
+            parse("[ocr]\nengine = \"tesseract\"").unwrap().ocr_engine,
+            OcrBackend::Tesseract
+        );
+    }
+
+    #[test]
     fn parses_repo_template() {
         let cfg = parse(include_str!("../../dt-ocr.toml")).unwrap();
         assert_eq!(
@@ -433,6 +466,7 @@ mod tests {
                 show_hint: true,
                 font: None,
                 ocr_scale: 4,
+                ocr_engine: OcrBackend::Auto,
                 ocr_language: None,
                 mask_fill: MaskFill::Lines,
                 mask_layout: MaskLayout::Overlay,

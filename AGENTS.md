@@ -89,8 +89,9 @@ window scaling. Same user, same machine, same conventions.
 dispatch, log; `host.rs` resident host window; `frame.rs` frame window, modes,
 SizeSpec input/tune, status strip; `interaction.rs` pure five-state machine;
 `overlay.rs` red draw band; `capture.rs` GDI BitBlt, clipboard, PNG sink; `hotkeys.rs`
-RegisterHotKey; `ocr.rs` capture → upscale → Windows OCR → line merge;
-`mask.rs` layered mask, overlay/reader rendering, selection, toggle; `text.rs`
+RegisterHotKey; `ocr.rs` engine routing + Windows OCR fallback; `ocr/external.rs`
+persistent RapidOCR worker + Tesseract TSV; `scripts/rapidocr_worker.py` embedded
+uv/ONNX worker; `mask.rs` layered mask, overlay/reader rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
 Shell_NotifyIconW; `menu.rs` native tray popup; `icon.rs`/`build.rs`
 procedural icon.
