@@ -165,8 +165,13 @@ an explorer restart silently removes the icon for the rest of the session.
 ## Machine prerequisites
 
 - Windows OCR language packs (Settings → Language): English (US) and Chinese
-  (Simplified), each with the OCR feature; without zh, `auto` falls back to
-  en and drops CJK.
+  (Simplified), each with the OCR feature; without zh, the Windows fallback
+  drops CJK.
+- `uv` (Scoop `main/uv`) for the embedded RapidOCR worker; its PEP-723 metadata
+  provisions `rapidocr-onnxruntime` on first use, so no manual pip install.
+- Tesseract plus `eng` and `chi_sim` traineddata (Scoop `tesseract` and
+  `tesseract-languages`). Auto's secondary pass needs only `eng`; a missing
+  executable or language leaves the RapidOCR result intact.
 - Fonts: `Sarasa Term SC Nerd` (mask default, the WezTerm face) and
   `Microsoft YaHei` (reader/fallback).
 
@@ -213,8 +218,10 @@ first ctrl+alt+s lands on Tune(width), later ones on Drag; inside resize it
 resets Input. Esc:
 Input→Drag, Drag/Tune→Move; any defocus exits resize to Move. Capture never
 changes mode. Move drags by its interior/arrows/hjkl; a border press from
-Move/Input/Tune enters Drag and the same captured mouse drag resizes
-(no WS_THICKFRAME or NC sizing dependence). Mouse geometry uses GetCursorPos:
+Move/Input/Tune enters Drag and the same captured mouse drag resizes without
+WS_THICKFRAME or NC sizing; the border press explicitly focuses the frame so Esc
+cannot remain with the previously OCR'd app (notably WezTerm). Mouse geometry
+uses GetCursorPos:
 WM_MOUSEMOVE client coordinates move with the frame and fed resize deltas
 back into themselves, collapsing the frame to 16 px. Every drag step repaints
 synchronously. Drag arrows move their matching edge (Shift inward, Ctrl ±5);
@@ -273,6 +280,24 @@ Term SC Nerd, the WezTerm face), `size` in points (default 10 = WezTerm's
 "reader"`. Reader paints an opaque page and reflows the text at the fixed
 size, paragraphs separated by a blank line; a click copies the whole text.
 
+P0.4 status: `[ocr] engine = "auto" | "rapid" | "tesseract"` selects the
+provider, hot-reloaded with the rest of the config. Auto runs RapidOCR first,
+uses Tesseract's `eng` pass to replace predominantly Latin lines, and falls
+back to Windows OCR (zh-Hans-CN then en-US) if RapidOCR cannot start. Explicit
+`en` chooses Tesseract in auto; explicit `chi_sim`/`zh` or another PP-OCR code
+chooses RapidOCR. Forced engines report an error instead of silently changing
+provider. RapidOCR is a persistent `uv run` Python worker, launched with
+`CREATE_NO_WINDOW`, using the embedded PEP-723 script
+`dt-ocr/scripts/rapidocr_worker.py`; it returns native character boxes, grouped
+into Latin words and individual CJK characters. Tesseract supplies TSV word
+boxes. Temporary PNGs are deleted after each request. When one English row
+matches several horizontally separated primary fragments (for example `87` and
+`ScanTailor Advanced`), the merged result emits that row once instead of keeping
+the fragments as duplicate lines. On the mixed sample,
+RapidOCR takes ~6.6 s including its first model start and ~0.8–1.1 s afterwards;
+Tesseract takes ~0.6–1.0 s. `mask_test.ps1` passes all 25 checks including exact
+mixed Latin+CJK selection, and `engine_routing_test.ps1` passes 8 checks.
+
 ## Design decisions (the part worth copying into other tools)
 
 | Phase | Decision | Why |
@@ -293,8 +318,9 @@ size, paragraphs separated by a blank line; a click copies the whole text.
 | P0.3 | Selection text = `join_words` per line + `\n` between lines | keeps line breaks, spaces between Latin words, none inside CJK |
 | P0.3 | Mask text fixed size by default (`size`, points; `auto` = per-line median) | per-word sizing made words jump; 10 pt matches the user's WezTerm font |
 | P0.3 | `layout = "reader"`: opaque page, reflowed text, click copies all | a readable mode separate from the position-faithful overlay |
-| P0.4 | RapidOCR measured: 4/4 lines exact at native res, ~1.6 s per CLI run, line boxes only | best quality by far; needs a persistent worker plus a word-splitting plan |
-| P0.4 | `auto` routes by a language table; explicit keys force an engine | the smallest rule set that answers multi-engine routing |
+| P0.4 | Persistent RapidOCR worker, native character boxes | avoids the ~1.6 s model reload per CLI call and gives the mask exact word hit-testing without guessing glyph widths |
+| P0.4 | `auto` = RapidOCR + Tesseract Latin-line replacement, Windows OCR fallback | best mixed-script result; an unavailable external dependency never removes OCR entirely |
+| P0.4 | External processes use `CREATE_NO_WINDOW`; worker stdin/stdout are UTF-8 | OCR never flashes a console, and CJK output is not corrupted by the Windows ANSI code page |
 | P0.6 | Releases and Scoop manifests use the `-ex` naming; the hash stays empty until the first release | assets and manifest autoupdate must agree; never call an unreleased package installable |
 
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

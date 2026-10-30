@@ -5,7 +5,7 @@ Extended desktop tools (the heavy/experimental siblings of
 drag-select screen OCR, window/desktop recording, flameshot-window capture,
 window scaling.
 
-Status: P0.1–P0.3 done (frame, overlay mask, reader); see
+Status: P0.1–P0.4 done (frame, overlay mask, reader, OCR engines); see
 [ROADMAP.md](ROADMAP.md) for what is left, and [AGENTS.md](AGENTS.md) for the
 conventions, the interaction model and the design decisions.
 

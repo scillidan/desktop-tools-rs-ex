@@ -432,12 +432,13 @@ unsafe fn read_lines(engine: &OcrEngine, bitmap: &SoftwareBitmap) -> Result<Vec<
 }
 
 /// `zh`-model lines keep CJK; Latin-only lines take the matching English line
-/// (vertical overlap >= half the smaller line height). An English line is
-/// consumed at most once. Mixed-script lines stay with the primary engine.
+/// (vertical overlap >= half the smaller line height). One English row replaces
+/// all horizontally separate primary fragments once; same-column rows remain
+/// independent. Mixed-script lines stay with the primary engine.
 fn merge_lines(primary: &[Vec<Word>], en: &[Vec<Word>]) -> Vec<Vec<Word>> {
-    let mut used = vec![false; en.len()];
+    let mut used_by = vec![None; en.len()];
     let mut out = Vec::with_capacity(primary.len());
-    for line in primary {
+    for (primary_index, line) in primary.iter().enumerate() {
         if mostly_cjk(line) {
             out.push(line.clone());
             continue;
@@ -448,9 +449,6 @@ fn merge_lines(primary: &[Vec<Word>], en: &[Vec<Word>]) -> Vec<Vec<Word>> {
         };
         let mut best: Option<(usize, i32)> = None;
         for (i, other) in en.iter().enumerate() {
-            if used[i] {
-                continue;
-            }
             let Some((et, eb)) = line_bounds(other) else {
                 continue;
             };
@@ -461,14 +459,38 @@ fn merge_lines(primary: &[Vec<Word>], en: &[Vec<Word>]) -> Vec<Vec<Word>> {
             }
         }
         match best {
-            Some((i, _)) => {
-                used[i] = true;
-                out.push(en[i].clone());
-            }
+            Some((i, _)) => match used_by[i] {
+                None => {
+                    used_by[i] = Some(primary_index);
+                    out.push(en[i].clone());
+                }
+                // One English row can replace several horizontally separate
+                // primary fragments ("87" + "ScanTailor"). Emit it once, not
+                // once plus every remaining fragment. Same-column overlapping
+                // rows stay independent (the old two-row case).
+                Some(first) if separate_columns(&primary[first], line) => {}
+                Some(_) => out.push(line.clone()),
+            },
             None => out.push(line.clone()),
         }
     }
     out
+}
+
+fn separate_columns(a: &[Word], b: &[Word]) -> bool {
+    let Some((al, ar)) = line_columns(a) else {
+        return false;
+    };
+    let Some((bl, br)) = line_columns(b) else {
+        return false;
+    };
+    ar <= bl || br <= al
+}
+
+fn line_columns(line: &[Word]) -> Option<(i32, i32)> {
+    let left = line.iter().map(|w| w.rect.l).min()?;
+    let right = line.iter().map(|w| w.rect.r).max()?;
+    Some((left, right))
 }
 
 fn line_bounds(line: &[Word]) -> Option<(i32, i32)> {
@@ -663,6 +685,29 @@ mod tests {
         let en = vec![vec![word("OCR", 0, 0, 20, 12), word("123", 50, 0, 70, 12)]];
         let merged = merge_lines(&zh, &en);
         assert_eq!(merged[0].len(), 4);
+    }
+
+    #[test]
+    fn merge_does_not_repeat_primary_fragments_replaced_by_one_english_line() {
+        let primary = vec![
+            vec![word("87", 0, 0, 18, 12)],
+            vec![
+                word("ScanTailor", 28, 0, 100, 12),
+                word("Advanced", 106, 0, 160, 12),
+            ],
+        ];
+        let en = vec![vec![
+            word("87", 0, 0, 18, 12),
+            word("ScanTailor", 28, 0, 100, 12),
+            word("Advanced", 106, 0, 160, 12),
+        ]];
+        let merged = merge_lines(&primary, &en);
+        assert_eq!(
+            merged.len(),
+            1,
+            "the English row replaces both primary fragments once"
+        );
+        assert_eq!(merged[0].len(), 3);
     }
 
     #[test]

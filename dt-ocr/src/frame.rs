@@ -755,6 +755,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let Some(code) = edge_code(&client, pt) else {
                 return DefWindowProcW(hwnd, msg, wparam, lparam);
             };
+            // A mask dismiss restores the previous app (often WezTerm). Border
+            // resizing must reclaim the keyboard or Esc goes back to that app.
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
             set_mode(hwnd, transition(state(hwnd).mode, Event::BorderPress));
             let mut start = RECT::default();
             if GetWindowRect(hwnd, &mut start).is_err() {

@@ -13,25 +13,13 @@ in `AGENTS.md`; this file is only what is left to build.
   dropped so repeated input cannot stack windows.
 - **P0.3** OCR mask: click-through capture, frozen-snapshot overlay with
   per-word hit-testing, line-band fill, reader layout, `toggle` binding.
+- **P0.4** OCR engines: persistent RapidOCR worker with native character boxes,
+  Tesseract TSV words, automatic mixed-script routing and Windows OCR fallback.
+  `mask_test.ps1` passes 25/25; `engine_routing_test.ps1` passes 8/8.
 - **P0.6** release packaging (tag workflow, Scoop manifests; the `-ex` hash
   stays empty until the first release).
 
-## P0.4 — OCR engines + language routing
-
-- RapidOCR (ONNX runtime) as the primary engine for CJK and mixed text,
-  Tesseract secondary for Latin scripts; `ocr.engine = "auto" | "rapid" |
-  "tesseract"`.
-- Interaction question that decides the shape: Windows OCR gives word boxes
-  at ~0 s extra cost; RapidOCR is exact at native resolution but ~1.6 s per
-  CLI call and line boxes only. A persistent worker plus word splitting is
-  the only way to keep word-level clicks with RapidOCR.
-- Port the language-detection interaction from `AHK-ScreenOCR` (AHK v1).
-- Native deps (onnxruntime DLLs, tessdata) provisioned via Scoop; verify
-  crate versions with context7 before pinning.
-- Done when: a frame over a Chinese UI and over an English page both OCR
-  correctly under `auto`, and forcing the other engine still works.
-
-## P0.5 — Auto-refresh triggers
+## P0.5 — Auto-refresh triggers (next)
 
 - Manual key (existing) plus automatic re-OCR: fixed interval and/or
   on-change (frame region hash above a threshold) — the text/graphic-game
