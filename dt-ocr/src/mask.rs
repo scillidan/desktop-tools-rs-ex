@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const BOX_ALPHA: u32 = 0xFF00_0000;
 const TEXT_WHITE: u32 = 0x00FF_FFFF;
-const SELECT_YELLOW: u32 = 0x0000D2FF; // RGB(255, 210, 0)
+const SELECT_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0)
 const DEFAULT_FACE: &str = "Sarasa Term SC Nerd";
 
 /// `[mask]` style resolved when a mask opens: font face, size and layout.
@@ -92,6 +92,7 @@ struct Base<'a> {
 }
 
 static MASK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static CAPTURE_EXCLUDED: AtomicBool = AtomicBool::new(false);
 
 /// `[mask] fill = "lines"`: continuous band per line segment. Off = boxes.
 static FILL_LINES: AtomicBool = AtomicBool::new(true);
@@ -138,6 +139,11 @@ fn mask_hwnd() -> HWND {
 
 /// Closes the overlay (no-op when none is open) and returns the frame to its
 /// normal interaction state.
+/// True when an old Windows build would capture the visible mask itself.
+pub unsafe fn visible_without_capture_exclusion() -> bool {
+    IsWindow(Some(mask_hwnd())).as_bool() && !CAPTURE_EXCLUDED.load(Ordering::Relaxed)
+}
+
 pub unsafe fn dismiss() {
     let hwnd = mask_hwnd();
     if IsWindow(Some(hwnd)).as_bool() {
@@ -268,6 +274,13 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapsho
         })) as isize,
     );
     MASK.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    // Auto-refresh samples the source without hiding this overlay. Windows
+    // omits the mask from the capture and exposes the desktop underneath.
+    let excluded = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok();
+    CAPTURE_EXCLUDED.store(excluded, Ordering::Relaxed);
+    if !excluded {
+        logline("warn: mask cannot be excluded from capture; auto refresh will dismiss it once");
+    }
     present(hwnd);
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
@@ -563,7 +576,7 @@ unsafe fn present(hwnd: HWND) {
     let s = state(hwnd);
     let len = (s.rect.w() * s.rect.h()) as usize;
     std::ptr::copy_nonoverlapping(s.base.as_ptr(), s.bits, len);
-    let brush = CreateSolidBrush(COLORREF(SELECT_YELLOW));
+    let brush = CreateSolidBrush(COLORREF(SELECT_ORANGE));
     for &index in &s.selected {
         let rc = to_win(s.words[index].rect);
         let _ = FrameRect(s.memdc, &rc, brush);
@@ -753,10 +766,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_RBUTTONUP => {
             let _ = ReleaseCapture();
+            crate::ocr::auto_disarm();
             dismiss();
             LRESULT(0)
         }
         WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_ESCAPE => {
+            crate::ocr::auto_disarm();
             dismiss();
             LRESULT(0)
         }
@@ -767,6 +782,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = DeleteObject(s.bitmap.into());
             let _ = DeleteDC(s.memdc);
             MASK.store(0, std::sync::atomic::Ordering::Relaxed);
+            CAPTURE_EXCLUDED.store(false, Ordering::Relaxed);
             if IsWindow(Some(s.parent)).as_bool() {
                 crate::frame::set_ocr_running(s.parent, false);
             }

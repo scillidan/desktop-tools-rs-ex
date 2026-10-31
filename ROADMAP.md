@@ -16,34 +16,50 @@ in `AGENTS.md`; this file is only what is left to build.
 - **P0.4** OCR engines: persistent RapidOCR worker with native character boxes,
   Tesseract TSV words, automatic mixed-script routing and Windows OCR fallback.
   `mask_test.ps1` passes 25/25; `engine_routing_test.ps1` passes 8/8.
+- **P0.5** auto-refresh: hot-reloadable fixed interval and/or on-change triggers,
+  250 ms source-window sampling with two-sample debounce. Static content keeps
+  the same mask; changed content re-OCRs without writing the clipboard.
+  `auto_refresh_test.ps1` passes 7/7.
 - **P0.6** release packaging (tag workflow, Scoop manifests; the `-ex` hash
   stays empty until the first release).
 
-## P0.5 — Auto-refresh triggers (next)
+## P0.5.1 — Auto OCR lifecycle + colour (in progress)
 
-- Manual key (existing) plus automatic re-OCR: fixed interval and/or
-  on-change (frame region hash above a threshold) — the text/graphic-game
-  use case.
-- `ocr.auto = false | { every_ms, on_change }`, hot-reloadable.
-- Done when: changing text inside the frame re-OCRs by itself, a static frame
-  does not (no flicker, no CPU spin).
+- Esc on an auto-refresh mask dismisses it **and disarms auto OCR**; a later
+  manual OCR arms it again. Changing source content dismisses the stale mask
+  immediately, then performs the debounced re-OCR and shows the new mask.
+- Replace the existing yellow resize/status/selection colours with orange;
+  configured colour names remain unaffected.
 
-## P0.7 — Selection and feedback polish
+## P1.1 — Drag-select quick OCR (next)
 
-- **Token-range selection** instead of rectangle intersection: anchor→head
-  token ranges, shift/ctrl extend, double-click a paragraph, ctrl+A; keep the
-  per-line copy rules.
-- **Copy feedback**: press/selection shows a yellow outline, a successful copy
-  flashes cyan twice (120/80/120 ms).
-- **Reader limits**: no scrolling (text clips), a click copies everything, no
-  per-word selection; paragraphs split on a vertical gap of ≥ one line
-  height. Decide whether the reader earns scrolling before adding it.
+- `ctrl+alt+o` draws a region and OCRs it directly. On completion the frame
+  flashes orange once and hides; the recognised text is copied to the clipboard.
+- Completion uses a system notification or a configured third-party notifier;
+  `[notify]` supports silent operation. Reuse the existing engines and joining.
+- `ctrl+alt+w` then Ctrl+Enter remains the distinct **window OCR** workflow.
+
+## P0.7 — OCR result presentation and editing
+
+- **Four presentations**: `box` (default) leaves source text unchanged and shows
+  an orange outline on click/selection; `box+mask` uses the configured font and
+  automatically inverted text/backing colours for extreme light/dark sources,
+  with an inverse-colour selection outline; `box+outside` puts a resize-like
+  colour bar outside the frame with configured-font black text preserving lines
+  and paragraphs; `notify` uses the quick-OCR notification settings and defaults
+  to silent. The old `reader` mode is removed.
+- Outside placement follows frame orientation: landscape prefers above/below,
+  portrait prefers left/right; if both sides lack space, use the roomier side
+  and align the floating panel to the available edge.
+- Showing or toggling a window-OCR result turns the frame orange. Result-mode
+  keys reuse the resize key positions but have result-specific meanings:
+  `ctrl+alt+p` pins and enables auto OCR, then flashes the frame orange once.
+- In outside mode, Ctrl+I edits the OCR text in place with basic editing keys;
+  Esc leaves editing. Keep the existing per-line copy rules.
+- **Selection polish**: token-range anchor→head selection, shift/ctrl extend,
+  double-click paragraph, Ctrl+A; successful copy flashes cyan twice.
 
 ## P1 — Parity with the existing AHK tools + more
-
-### P1.1 Drag-select screen OCR
-- Port `AHK-ScreenOCR`: draw a rect anywhere → OCR → result (copy/show).
-  Shares engines + paragraph-join logic with dt-ocr.
 
 ### P1.2 Focused-window capture + the screenshot feature set
 - Done: `frame_window` (ctrl+alt+w) drops the frame on the focused window (or

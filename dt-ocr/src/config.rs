@@ -26,6 +26,8 @@ pub struct Config {
     /// OCR backend: auto = RapidOCR + Tesseract Latin correction, falling
     /// back to Windows OCR when the external engine is unavailable.
     pub ocr_engine: OcrBackend,
+    /// Automatic re-OCR after the first manual capture. Disabled by default.
+    pub ocr_auto: OcrAuto,
     /// Recognizer language tag (`zh`, `en`, `zh-Hans-CN`, ...). `None` =
     /// auto: prefer a CJK pack, then English. A tag that is not installed
     /// falls back to auto with a warning.
@@ -60,6 +62,20 @@ pub enum OcrBackend {
     Auto,
     Rapid,
     Tesseract,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct OcrAuto {
+    /// Fixed refresh interval; `None` disables time-based refreshes.
+    pub every_ms: Option<u64>,
+    /// Re-OCR after the sampled source pixels change materially.
+    pub on_change: bool,
+}
+
+impl OcrAuto {
+    pub fn enabled(self) -> bool {
+        self.every_ms.is_some() || self.on_change
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +224,7 @@ impl Default for Config {
             font: None,
             ocr_scale: 4,
             ocr_engine: OcrBackend::Auto,
+            ocr_auto: OcrAuto::default(),
             ocr_language: None,
             mask_fill: MaskFill::Lines,
             mask_layout: MaskLayout::Overlay,
@@ -241,6 +258,41 @@ fn parse_color(s: &str) -> Option<u32> {
             .filter(|h| h.len() == 6)
             .and_then(|h| u32::from_str_radix(h, 16).ok())
     })
+}
+
+fn parse_auto(v: &toml::Value) -> OcrAuto {
+    if v.as_bool() == Some(false) {
+        return OcrAuto::default();
+    }
+    let Some(t) = v.as_table() else {
+        eprintln!("warn: ocr.auto must be false or an inline table; using false");
+        return OcrAuto::default();
+    };
+    let every_ms = match t.get("every_ms") {
+        None => None,
+        Some(v) => match v.as_integer() {
+            Some(0) => None,
+            Some(n) if (250..=60_000).contains(&n) => Some(n as u64),
+            _ => {
+                eprintln!("warn: ocr.auto.every_ms must be 0 or 250..=60000; disabling interval");
+                None
+            }
+        },
+    };
+    let on_change = match t.get("on_change") {
+        None => false,
+        Some(v) => match v.as_bool() {
+            Some(b) => b,
+            None => {
+                eprintln!("warn: ocr.auto.on_change must be true/false; using false");
+                false
+            }
+        },
+    };
+    OcrAuto {
+        every_ms,
+        on_change,
+    }
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -319,6 +371,9 @@ pub fn parse(text: &str) -> Result<Config> {
                         Some(s) => cfg.ocr_language = Some(s.to_string()),
                         None => eprintln!("warn: ocr.language must be a string; using auto"),
                     }
+                }
+                if let Some(v) = t.get("auto") {
+                    cfg.ocr_auto = parse_auto(v);
                 }
             }
             None => eprintln!("warn: [ocr] must be a table; using defaults"),
@@ -455,6 +510,27 @@ mod tests {
     }
 
     #[test]
+    fn auto_refresh_config_parses() {
+        assert_eq!(parse("").unwrap().ocr_auto, OcrAuto::default());
+        assert_eq!(
+            parse("[ocr]\nauto = { every_ms = 1000, on_change = true }")
+                .unwrap()
+                .ocr_auto,
+            OcrAuto {
+                every_ms: Some(1000),
+                on_change: true
+            }
+        );
+        assert_eq!(
+            parse("[ocr]\nauto = { every_ms = 0, on_change = true }")
+                .unwrap()
+                .ocr_auto
+                .every_ms,
+            None
+        );
+    }
+
+    #[test]
     fn parses_repo_template() {
         let cfg = parse(include_str!("../../dt-ocr.toml")).unwrap();
         assert_eq!(
@@ -467,6 +543,7 @@ mod tests {
                 font: None,
                 ocr_scale: 4,
                 ocr_engine: OcrBackend::Auto,
+                ocr_auto: OcrAuto::default(),
                 ocr_language: None,
                 mask_fill: MaskFill::Lines,
                 mask_layout: MaskLayout::Overlay,

@@ -89,7 +89,8 @@ window scaling. Same user, same machine, same conventions.
 dispatch, log; `host.rs` resident host window; `frame.rs` frame window, modes,
 SizeSpec input/tune, status strip; `interaction.rs` pure five-state machine;
 `overlay.rs` red draw band; `capture.rs` GDI BitBlt, clipboard, PNG sink; `hotkeys.rs`
-RegisterHotKey; `ocr.rs` engine routing + Windows OCR fallback; `ocr/external.rs`
+RegisterHotKey; `ocr.rs` engine routing + Windows OCR fallback; `ocr/auto.rs`
+250 ms source sampling + debounce; `ocr/external.rs`
 persistent RapidOCR worker + Tesseract TSV; `scripts/rapidocr_worker.py` embedded
 uv/ONNX worker; `mask.rs` layered mask, overlay/reader rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
@@ -209,7 +210,7 @@ The kbdhook pipeline is intentionally NOT copied yet; P0.2 owns the hotkeys
 and a minimal native tray.
 
 P0.2 status: dt-ocr frame window complete. `interaction.rs` is the tested,
-explicit five-state model: Move (cyan), Pinned (blue), and yellow resize
+explicit five-state model: Move (cyan), Pinned (blue), and orange resize
 substates Input / Drag / Tune. `frame.rs` only applies those transitions;
 there are no independent pinned/spec booleans. pin (`ctrl+shift+alt+t`)
 toggles Pinned/Move from every state; ctrl+alt+m/s are global absolute mode
@@ -297,6 +298,25 @@ the fragments as duplicate lines. On the mixed sample,
 RapidOCR takes ~6.6 s including its first model start and ~0.8–1.1 s afterwards;
 Tesseract takes ~0.6–1.0 s. `mask_test.ps1` passes all 25 checks including exact
 mixed Latin+CJK selection, and `engine_routing_test.ps1` passes 8 checks.
+
+P0.5 status: `[ocr] auto = false | { every_ms, on_change }` is hot-reloaded and
+disabled by default. Auto-refresh arms only after a manual OCR, never at daemon
+startup or on a fixed-width preview. The existing 250 ms host timer also drives
+sampling (config is polled every fourth tick). On-change compares a 48×27 luma
+fingerprint of the source window, ignores blank `PrintWindow` results, requires
+≥0.5% changed samples twice consecutively, and waits at least 500 ms between
+OCR runs. The first changed sample immediately dismisses the now-stale mask;
+the second confirms the change and starts OCR. Esc or right-click on a mask
+also disarms auto refresh until the next manual OCR, while internal dismissal
+leaves it armed. Sampling uses ordinary `PrintWindow` on the topmost real source
+window
+when the frame is contained in it; `PW_RENDERFULLCONTENT` returned blank frames
+on this machine. Static content leaves the existing mask untouched. A due
+refresh dismisses the old mask before the full-screen capture, reuses
+`ocr::start`, and never writes the clipboard. `every_ms` works independently of
+`on_change`. `auto_refresh_test.ps1` passes 7 checks; its OCR-only start uses
+internal `WM_OCR_START` so the machine's wedging image-clipboard path is not
+part of the test.
 
 ## Design decisions (the part worth copying into other tools)
 

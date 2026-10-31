@@ -17,6 +17,7 @@ use windows::Storage::Streams::{FileRandomAccessStream, IRandomAccessStream};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 use windows::Win32::System::Ole::{CF_BITMAP, CF_DIB, CF_UNICODETEXT};
@@ -307,7 +308,7 @@ unsafe fn usable(hwnd: HWND) -> Option<RECT> {
 
 struct Under {
     pt: POINT,
-    found: Option<RECT>,
+    found: Option<(HWND, RECT)>,
 }
 
 unsafe extern "system" fn under_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -325,7 +326,7 @@ unsafe extern "system" fn under_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // `usable`, so the first hit is the app the user actually sees.
     if inside {
         if let Some(rect) = usable(hwnd) {
-            hit.found = Some(rect);
+            hit.found = Some((hwnd, rect));
             return false.into();
         }
     }
@@ -333,7 +334,7 @@ unsafe extern "system" fn under_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
 }
 
 /// Topmost real window containing `pt`, skipping overlays.
-unsafe fn window_under(pt: POINT) -> Option<RECT> {
+unsafe fn window_under(pt: POINT) -> Option<(HWND, RECT)> {
     let mut hit = Under { pt, found: None };
     let _ = EnumWindows(Some(under_cb), LPARAM(&mut hit as *mut _ as isize));
     hit.found
@@ -359,7 +360,7 @@ pub unsafe fn window_target() -> Result<RECT> {
         };
         logline("warn: GetCursorPos failed; using the hotkey message position");
     }
-    if let Some(r) = window_under(pt) {
+    if let Some((_, r)) = window_under(pt) {
         logline(&format!(
             "capture target: under cursor at ({},{})",
             pt.x, pt.y
@@ -377,6 +378,60 @@ pub unsafe fn window_target() -> Result<RECT> {
         "GetMonitorInfoW failed"
     );
     Ok(info.rcMonitor)
+}
+
+/// Render the topmost source window directly, bypassing an occluding mask.
+/// Used only by auto-refresh sampling. Full OCR still uses ordinary screen
+/// capture when this source-only sampler is not applicable. Returns top-down
+/// BGRA for exactly `rect`.
+pub unsafe fn print_source(rect: RECT) -> Result<(i32, i32, Vec<u8>)> {
+    let pt = POINT {
+        x: (rect.left + rect.right) / 2,
+        y: (rect.top + rect.bottom) / 2,
+    };
+    let (hwnd, source) = window_under(pt).context("no source window under frame")?;
+    ensure!(
+        rect.left >= source.left
+            && rect.top >= source.top
+            && rect.right <= source.right
+            && rect.bottom <= source.bottom,
+        "frame is not contained in one source window"
+    );
+    let (sw, sh) = (source.right - source.left, source.bottom - source.top);
+    let screen = GetDC(None);
+    ensure!(!screen.0.is_null(), "GetDC(screen) failed");
+    let mem = CreateCompatibleDC(Some(screen));
+    let mut info = BITMAPINFO::default();
+    info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    info.bmiHeader.biWidth = sw;
+    info.bmiHeader.biHeight = -sh;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB.0;
+    let mut bits: *mut core::ffi::c_void = ptr::null_mut();
+    let bmp = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+        .context("CreateDIBSection failed")?;
+    let old = SelectObject(mem, bmp.into());
+    let printed = PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(0)).as_bool();
+    let _ = SelectObject(mem, old);
+    let _ = DeleteDC(mem);
+    let _ = ReleaseDC(None, screen);
+    ensure!(printed && !bits.is_null(), "PrintWindow failed");
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        let src = ((rect.top - source.top + y) * sw + rect.left - source.left) as usize * 4;
+        let dst = (y * w * 4) as usize;
+        out[dst..dst + (w * 4) as usize].copy_from_slice(std::slice::from_raw_parts(
+            (bits as *const u8).add(src),
+            (w * 4) as usize,
+        ));
+    }
+    let _ = DeleteObject(bmp.into());
+    for i in 0..out.len() / 4 {
+        out[i * 4 + 3] = 0xff;
+    }
+    Ok((w, h, out))
 }
 
 /// BitBlt the screen rect into a top-down 32 bpp DIB with opaque alpha.

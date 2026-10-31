@@ -26,8 +26,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub const COLOR_KEY: COLORREF = COLORREF(0x00FE00FF); // RGB(255, 0, 254)
 const BORDER_DRAG: u32 = 0x00C8C800; // RGB(0, 200, 200) cyan — draggable
 const BORDER_PINNED: u32 = 0x00D77800; // RGB(0, 120, 215) blue — pinned
-const BORDER_SPEC: u32 = 0x0000C8FF; // RGB(255, 200, 0) yellow — size mode
-const BAR_YELLOW: u32 = 0x0000D2FF; // RGB(255, 210, 0) — status strip bg / inside text
+const BORDER_SPEC: u32 = 0x0000A5FF; // RGB(255, 165, 0) orange — size mode
+const BAR_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0) — status strip bg / inside text
 const TEXT_BLACK: u32 = 0x00000000;
 const TUNE_RED: u32 = 0x000000FF; // RGB(255, 0, 0) — value clamped at the monitor limit
 const FLASH_CYAN: u32 = 0x00FFFF00; // RGB(0, 255, 255) — capture feedback flash
@@ -62,7 +62,7 @@ pub struct FrameState {
     /// Separate topmost window carrying the strip when there is room
     /// outside the frame; hidden (and `inside` = true) otherwise.
     pub status: HWND,
-    /// The strip currently renders inside the frame (yellow text) instead
+    /// The strip currently renders inside the frame (orange text) instead
     /// of in the outside strip window.
     pub inside: bool,
     /// Blink phase of the Input cursor (toggled by the 500 ms timer).
@@ -1075,11 +1075,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 Mode::Pinned => LRESULT(0),
             }
         }
+        crate::ocr::WM_OCR_START => {
+            if let Err(e) = crate::ocr::start(hwnd) {
+                logline(&format!("ocr capture failed: {e:#}"));
+            }
+            LRESULT(0)
+        }
         // OCR worker finished (numbers come from the capture it took; the
         // frame may have moved since, in which case the mask still matches
         // the pixels that were read).
         crate::ocr::WM_OCR_DONE => {
             let outcome = *Box::from_raw(lparam.0 as *mut crate::ocr::Outcome);
+            crate::ocr::finished(hwnd);
             set_ocr_running(hwnd, false);
             match outcome.words {
                 Ok(words) if !words.is_empty() => {
@@ -1611,14 +1618,14 @@ unsafe fn frame_size(hwnd: HWND) -> (i32, i32) {
 }
 
 /// Fallback when there is no room outside the frame: the same status line
-/// rendered at the bottom inner edge in yellow over the screen.
+/// rendered at the bottom inner edge in orange over the screen.
 unsafe fn draw_inside_status(hdc: HDC, frame: HWND, client: &RECT, cursor_on: bool) {
     let line = inside_line(client);
     if line.top <= client.top + 2 {
         return; // frame too small for the inside line
     }
     let sd = status_draw(frame, &line);
-    draw_status_line(hdc, &sd, cursor_on, BAR_YELLOW);
+    draw_status_line(hdc, &sd, cursor_on, BAR_ORANGE);
 }
 
 /// Width/height of `text` in the currently selected font (DrawText calc).
@@ -1654,12 +1661,12 @@ unsafe fn status_font(face: &str) -> HFONT {
     )
 }
 
-/// Renders one laid-out status line: black input field with yellow text, a
-/// full-cell cursor blinking yellow/black ON the last typed char, and the
+/// Renders one laid-out status line: black input field with orange text, a
+/// full-cell cursor blinking orange/black ON the last typed char, and the
 /// `w x h` readout on the right — the tuned half inverted (black field +
-/// yellow text, red when clamped at the monitor limit). The input zone is
+/// orange text, red when clamped at the monitor limit). The input zone is
 /// not drawn at all while fine-tuning. `info_color` is the readout color
-/// (black on the yellow strip, yellow inside the frame).
+/// (black on the orange strip, orange inside the frame).
 unsafe fn draw_status_line(hdc: HDC, sd: &StatusDraw, cursor_on: bool, info_color: u32) {
     let l = &sd.layout;
     let font = status_font(&sd.font_face);
@@ -1673,7 +1680,7 @@ unsafe fn draw_status_line(hdc: HDC, sd: &StatusDraw, cursor_on: bool, info_colo
         let _ = FillRect(hdc, &l.field, black);
         // 2. Typed input at text_x, clipped so it never paints over the readout.
         if !sd.spec.is_empty() && l.input.right > l.input.left {
-            let _ = SetTextColor(hdc, COLORREF(BAR_YELLOW));
+            let _ = SetTextColor(hdc, COLORREF(BAR_ORANGE));
             let rgn = CreateRectRgn(l.input.left, l.input.top, l.input.right, l.input.bottom);
             let _ = SelectClipRgn(hdc, Some(rgn));
             let mut rc = RECT {
@@ -1692,16 +1699,16 @@ unsafe fn draw_status_line(hdc: HDC, sd: &StatusDraw, cursor_on: bool, info_colo
             let _ = SelectClipRgn(hdc, None);
             let _ = DeleteObject(rgn.into());
         }
-        // 3. Cursor cell: full char cell, yellow phase / black phase. The
+        // 3. Cursor cell: full char cell, orange phase / black phase. The
         // char under the block sits on the cursor cell; redraw it in the
         // inverse color so it stays visible in both blink phases.
-        let cur = CreateSolidBrush(COLORREF(if cursor_on { BAR_YELLOW } else { TEXT_BLACK }));
+        let cur = CreateSolidBrush(COLORREF(if cursor_on { BAR_ORANGE } else { TEXT_BLACK }));
         let _ = FillRect(hdc, &l.cursor, cur);
         let _ = DeleteObject(cur.into());
         if let Some(c) = sd.spec.chars().last() {
             let _ = SetTextColor(
                 hdc,
-                COLORREF(if cursor_on { TEXT_BLACK } else { BAR_YELLOW }),
+                COLORREF(if cursor_on { TEXT_BLACK } else { BAR_ORANGE }),
             );
             let mut rc = l.cursor;
             let mut w: Vec<u16> = c.to_string().encode_utf16().collect();
@@ -1732,7 +1739,7 @@ unsafe fn draw_status_line(hdc: HDC, sd: &StatusDraw, cursor_on: bool, info_colo
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
             );
         };
-        let tuned = if sd.tune_red { TUNE_RED } else { BAR_YELLOW };
+        let tuned = if sd.tune_red { TUNE_RED } else { BAR_ORANGE };
         let inv_w = sd.tune_field == Some(TuneField::W);
         let inv_h = sd.tune_field == Some(TuneField::H);
         if inv_w {
@@ -1844,7 +1851,7 @@ unsafe extern "system" fn status_wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPA
     }
 }
 
-/// Paints the outside strip: yellow background with the shared status line.
+/// Paints the outside strip: orange background with the shared status line.
 unsafe fn paint_status(hwnd: HWND) {
     let parent = HWND(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as _);
     let cursor_on = state(parent).cursor_on;
@@ -1852,7 +1859,7 @@ unsafe fn paint_status(hwnd: HWND) {
     let hdc = BeginPaint(hwnd, &mut ps);
     let mut client = RECT::default();
     let _ = GetClientRect(hwnd, &mut client);
-    let fill = CreateSolidBrush(COLORREF(BAR_YELLOW));
+    let fill = CreateSolidBrush(COLORREF(BAR_ORANGE));
     let _ = FillRect(hdc, &client, fill);
     let _ = DeleteObject(fill.into());
     let sd = status_draw(parent, &client);

@@ -23,6 +23,9 @@ scale = 4
 # correction) or a tag such as "en", "zh". External engines must be installed;
 # auto falls back to the built-in Windows OCR when they are unavailable.
 language = "auto"
+# Auto-refresh is armed by the first manual Ctrl+Enter. false (default) disables it.
+# auto = { every_ms = 1000, on_change = true }  # either trigger may be enabled alone
+auto = false
 
 [mask]
 # OCR result layer: "lines" = one continuous black band per OCR line segment

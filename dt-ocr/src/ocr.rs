@@ -7,7 +7,11 @@
 //! this with the RapidOCR/Tesseract router; this module keeps the seam
 //! (`Word`, `Outcome`) so the router only swaps `recognize`.
 
+mod auto;
 mod external;
+
+pub(crate) use auto::finished;
+pub use auto::{auto_tick, disarm as auto_disarm, set_auto};
 
 use crate::config::OcrBackend;
 use crate::logline;
@@ -27,6 +31,7 @@ use windows::Win32::System::WinRT::{IBufferByteAccess, RoInitialize, RO_INIT_MUL
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 /// Worker → UI thread: recognition finished, `lparam` is `Box<Outcome>`.
+pub const WM_OCR_START: u32 = WM_APP;
 pub const WM_OCR_DONE: u32 = WM_APP + 1;
 
 static ENGINE: RwLock<OcrBackend> = RwLock::new(OcrBackend::Auto);
@@ -93,6 +98,7 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
         max,
     );
     let (w, h, pixels, snapshot) = capture_bgra(rect, scale)?;
+    auto::before_start(frame, &snapshot);
     crate::frame::set_ocr_running(frame, true);
     logline(&format!(
         "ocr: capture {w}x{h} (scale {scale}, max {max}px) at ({},{})",
@@ -135,6 +141,7 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
         .is_err()
         {
             drop(Box::from_raw(outcome));
+            auto::finished(frame);
         }
     });
     Ok(())

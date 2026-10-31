@@ -91,6 +91,7 @@ fn run() -> Result<()> {
     let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
     let mut cfg = config::parse(&text)?;
     ocr::set_engine(cfg.ocr_engine);
+    ocr::set_auto(cfg.ocr_auto);
     mask::set_fill(cfg.mask_fill);
     mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
     set_capture_dir(&cfg.capture_dir);
@@ -119,10 +120,11 @@ fn run() -> Result<()> {
     // pattern — mtime polling, no notify dependency).
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{SetTimer, TIMERPROC};
-        let _ = SetTimer(Some(host.hwnd()), 1, 1000, Some(TIMERPROC::None));
+        let _ = SetTimer(Some(host.hwnd()), 1, 250, Some(TIMERPROC::None));
     }
 
     let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+    let mut last_config_poll = std::time::Instant::now();
     loop {
         let got =
             unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageW(&mut msg, None, 0, 0) };
@@ -149,7 +151,11 @@ fn run() -> Result<()> {
                 }
             }
         }
-        if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_TIMER && msg.wParam.0 == 1 {
+        if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_TIMER
+            && msg.wParam.0 == 1
+            && last_config_poll.elapsed() >= std::time::Duration::from_secs(1)
+        {
+            last_config_poll = std::time::Instant::now();
             let now = dt_common::config::modified(&cfg_path);
             if now != mtime {
                 mtime = now;
@@ -157,6 +163,7 @@ fn run() -> Result<()> {
                     Ok(new_cfg) => {
                         logline("config reloaded, hotkeys re-registered");
                         ocr::set_engine(new_cfg.ocr_engine);
+                        ocr::set_auto(new_cfg.ocr_auto);
                         hotkeys.unregister_all(host.hwnd());
                         hotkeys = register_hotkeys(host.hwnd(), &new_cfg);
                         for &current in frames.all() {
@@ -190,6 +197,10 @@ fn run() -> Result<()> {
             }
         }
         unsafe {
+            if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_TIMER && msg.wParam.0 == 1
+            {
+                ocr::auto_tick();
+            }
             let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
             windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
         }
