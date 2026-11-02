@@ -14,9 +14,10 @@ in `AGENTS.md`; this file is only what is left to build.
 - **P0.3** OCR mask: click-through capture, frozen-snapshot overlay with
   per-word hit-testing, `box` / `box+mask` / `box+outside` presentations,
   line-band fill, `toggle` binding. `box+outside` is an editable multi-line
-  orange editor using `frame.font`, preloaded with OCR text. Old `reader` mode
-  removed. A result keeps a green 2 px edge (the mask paints it too,
-  because the mask covers the frame) until dismissal.
+  orange editor using `[mask] font` (default Sarasa Term SC Nerd, monospaced),
+  preloaded with OCR text; no scrollbar, the control still scrolls by wheel and
+  keys. Old `reader` mode removed. A result keeps a green 2 px edge (the mask
+  paints it too, because the mask covers the frame) until dismissal.
 - **P0.4** OCR engines: persistent RapidOCR worker with native character boxes,
   Tesseract TSV words, automatic mixed-script routing and Windows OCR fallback.
   `mask_test.ps1` passes 25/25; `engine_routing_test.ps1` passes 8/8.
@@ -28,11 +29,14 @@ in `AGENTS.md`; this file is only what is left to build.
   `ctrl+alt+s` pauses and drops any in-flight result while the frame is resized.
 - **P0.5.1** Esc/right-click dismiss a mask while an armed auto session stays
   armed; yellow resize/status/selection colours replaced with orange.
-- **Quick OCR** `ctrl+alt+o` draws, OCRs, copies the whole text, flashes
-  green and closes the frame. `ocr_actions_test.ps1` passes 22/22.
+- **Quick OCR** `ctrl+alt+o` draws, OCRs, copies the whole text reflowed into
+  paragraphs, flashes green and closes the frame. `ocr_actions_test.ps1` passes
+  22/22.
 - **Outside editor** native EDIT with its own 200-step undo/redo, token-wise
-  Ctrl+Left/Right, Ctrl+A, and a black/orange custom scrollbar.
-  `editor_test.ps1` passes 16/16; `edit_keys_test.ps1` passes 13/13.
+  Ctrl+Left/Right (Shift+Ctrl included, line breaks handled), Ctrl+A, no
+  scrollbar, and topmost floating when the preferred side is short.
+  `editor_test.ps1` passes 15/15; `outside_lines_test.ps1` 2/2;
+  `edit_keys_test.ps1` passes 19/19.
 - **P0.6** release packaging (tag workflow, Scoop manifests; the `-ex` hash
   stays empty until the first release).
 

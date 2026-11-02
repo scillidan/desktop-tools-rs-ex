@@ -378,13 +378,6 @@ unsafe fn state_opt(hwnd: HWND) -> Option<&'static mut FrameState> {
     Some(&mut *(p as *mut FrameState))
 }
 
-/// Status-strip face, reused by the `box+outside` editor.
-pub unsafe fn font_face(hwnd: HWND) -> String {
-    state_opt(hwnd)
-        .map(|s| s.font_face.clone())
-        .unwrap_or_else(|| "Consolas".to_string())
-}
-
 /// Live-update the status-strip prefs and the OCR scale (config hot-reload).
 pub unsafe fn set_prefs(
     hwnd: HWND,

@@ -32,14 +32,14 @@ auto_delay_ms = 1000
 # "box" = leave source text untouched (default); "box+mask" = redraw words with
 # the configured font and inverse background/text colours; "box+outside" =
 # source untouched plus an editable multi-line orange editor below/right of the
-# frame (preloaded with the OCR text, using frame.font).
+# frame (preloaded with the OCR text, using `font` below).
 mode = "box"
 # Only box+mask uses fill: "lines" = one continuous band per OCR line segment,
 # "boxes" = one block per word. Hot-reloads.
 fill = "lines"
-# Text face and size for box+mask, in points ("auto" = size each line from its
-# source height). Defaults match the dotfiles WezTerm config. The outside
-# editor always uses frame.font.
+# Text face for box+mask and the outside editor (outside is fixed at 12 px,
+# normal weight, monospace; default Sarasa Term SC Nerd). `size` in points
+# applies to box+mask only ("auto" = size each line from its source height).
 font = "Sarasa Term SC Nerd"
 size = 10
 

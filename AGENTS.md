@@ -67,6 +67,14 @@ window scaling. Same user, same machine, same conventions.
   path calls `UpdateWindow` directly. `SystemParametersInfoForDpi` fails with
   E_INVALIDARG here — DPI comes from `GetDpiForWindow`; mask `size` is points
   (`em_px = pt * dpi / 72`).
+- A `PCWSTR` needs a NUL terminator: `"…".encode_utf16().collect::<Vec<_>>()`
+  does not include one, and `SetWindowTextW` then reads past the buffer into
+  heap data (the arbitrary CJK/`stdout -l eng…` suffix seen in the outside
+  editor). Always append `0` (the `wide()` helper) before handing a string to a
+  Win32 API that takes a pointer instead of a length.
+- A multiline `EDIT` only breaks lines on `\r\n`; a bare `\n` collapses the
+  whole result onto one visual line. Convert OCR output with
+  `edit_newlines()` before `SetWindowTextW` (the clipboard keeps plain `\n`).
 
 ## Agent workflow
 
@@ -107,8 +115,10 @@ editor is open. The mask covers the frame rect, so it paints the same
 dismissed or hidden.
 
 `quick_ocr` (ctrl+alt+o) draws a region, OCRs it, copies the whole text to the
-clipboard, flashes green and closes the frame. No mask is shown, so this
-one is a brief green beat before it disappears.
+clipboard, flashes green and closes the frame. No mask is shown, so this one is
+a brief green beat before it disappears. The copy reflows wrapped OCR lines back
+into their paragraph (blank line between paragraphs), matching a direct screen
+selection instead of emitting every visual line.
 
 `auto_ocr` (ctrl+shift+alt+o) is the only way to enter automatic OCR. With no
 frame it draws one; with a frame visible (any mode) it OCRs that frame
@@ -303,16 +313,15 @@ inverse-colour bands (the dominant source colour is inverted for the band and
 inverted again for text, so dark and light terminals both stay readable); its
 selection outline uses the text colour. `box+outside` leaves the source pixels
 untouched and opens a multi-line native `EDIT` bar, orange with black text,
-using `frame.font` at the status strip's 12 px bold — the resize input box made
-multi-line. The OCR text is preloaded; every normal editing key works. Plain
-Ctrl+Left/Right jumps to token edges (word, symbol run such as `=`, or line
-break) and stops at the word end, never after trailing whitespace; Shift+Ctrl
-stays with the stock control so the selection anchor survives. The page keeps
-its own undo/redo history (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z; consecutive typing
-within 700 ms is one step), implements Ctrl+A, and leaves Ctrl+C/X/V,
-Ctrl+Backspace/Delete, Home/End and Shift selection to the EDIT control. A
-vertical scrollbar is a custom child window: black track with an orange thumb,
-dragging or clicking the track scrolls via EM_LINESCROLL. Esc closes the result.
+using `[mask] font` (default Sarasa Term SC Nerd) at 12 px normal with fixed
+pitch — the resize input box made multi-line. The OCR text is preloaded; every
+normal editing key works. Ctrl+Left/Right (also with Shift) jumps to token
+edges — word, symbol run such as `=`, or a line break — and stops at the word
+end, never after trailing whitespace. The page keeps its own undo/redo history
+(Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z; consecutive typing within 700 ms is one step),
+implements Ctrl+A, and leaves Ctrl+C/X/V, Ctrl+Backspace/Delete, Home/End and
+Shift selection to the EDIT control. There is no scrollbar; the EDIT control
+still scrolls with the wheel, arrows and PageUp/PageDown. Esc closes the result.
 Landscape puts the page BELOW the frame, portrait to the RIGHT; when that side
 is short (e.g. full-screen OCR) the topmost bar floats over the frame and shifts
 up/left just enough to stay on the monitor. In `box+mask`, `[mask] fill = "lines"`
@@ -363,9 +372,12 @@ the armed session alone; the next change OCRs again. Sampling tries ordinary
 first render with real contrast (plain `PrintWindow` returned a blank surface on
 real apps here); `ocr_actions_test.ps1` covers the no-frame guard, outside
 editor, arming/refreshing/pausing/switching off and quick OCR (22 checks), and
-`editor_test.ps1` covers the persistent green result border, editor scrollbar
-colors/scrolling and pause/resume (16 checks); `edit_keys_test.ps1` covers
-Ctrl+Z/Y, Ctrl+A and token-wise Ctrl+Left/Right (13 checks).
+`editor_test.ps1` covers the persistent green result border, the mono editor
+font, exact preloaded text with no trailing heap garbage, the absence of a
+scrollbar and pause/resume (15 checks); `outside_lines_test.ps1` covers
+paragraph breaks and CRLF in the editor (2 checks); `edit_keys_test.ps1` covers
+Ctrl+Z/Y, Ctrl+A and token-wise Ctrl+Left/Right including Shift+Ctrl across a
+line break (19 checks).
 
 ## Design decisions (the part worth copying into other tools)
 

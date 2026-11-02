@@ -338,7 +338,7 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapsho
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "auto".into())
         ),
-        MaskMode::BoxOutside => format!("{} 12px editor", crate::frame::font_face(parent)),
+        MaskMode::BoxOutside => format!("{} 12px editor", style.font),
     };
     logline(&format!(
         "mask: {mode}, {} words, {font_info} over {w}x{h} at ({},{}), first `{}` {:?}",
@@ -392,9 +392,11 @@ fn line_segments(words: &[Word]) -> Vec<Rect> {
     out
 }
 
-/// Whole result in reading order, used by quick OCR's clipboard copy.
+/// Whole result in reading order, used by quick OCR's clipboard copy. Wrapped
+/// OCR lines are joined back into their paragraph, with a blank line between
+/// paragraphs, matching what a direct screen selection copies.
 pub fn all_text(words: &[Word]) -> String {
-    selection_text(words, (0..words.len()).collect())
+    panel_text(words)
 }
 
 /// Text for a selection in reading order: `join_words` rules inside a line
@@ -680,6 +682,12 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Multiline `EDIT` treats only CRLF as a line break; a bare LF leaves the
+/// whole result on one visual line.
+fn edit_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
 /// Preferred outside span: below the frame the editor grows with the OCR
 /// text, capped at 2/3 of the work area; beside it a readable fixed width.
 fn page_span(frame: Rect, work: Rect, text: &str) -> i32 {
@@ -736,7 +744,6 @@ struct UndoSnap {
 
 struct PageState {
     edit: HWND,
-    sb: HWND,
     font: HFONT,
     brush: HBRUSH,
     old_edit: isize,
@@ -744,8 +751,7 @@ struct PageState {
     redo: Vec<UndoSnap>,
     last_edit: Option<std::time::Instant>,
     last_typing: bool,
-    sb_show: bool,
-    sb_drag: Option<i32>,
+    anchor: Option<i32>,
 }
 
 unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
@@ -770,26 +776,6 @@ unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
             windows::core::Error::from_win32()
         );
     }
-    let sb_class = w!("dt-ocr.maskpage.sb");
-    let sb_wc = WNDCLASSW {
-        style: WNDCLASS_STYLES(0),
-        lpfnWndProc: Some(sb_wndproc),
-        cbClsExtra: 0,
-        cbWndExtra: 0,
-        hInstance: instance,
-        hIcon: HICON::default(),
-        hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-        hbrBackground: HBRUSH::default(),
-        lpszMenuName: windows::core::PCWSTR::null(),
-        lpszClassName: windows::core::PCWSTR(sb_class.as_ptr()),
-    };
-    let sb_atom = RegisterClassW(&sb_wc);
-    if sb_atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
-        anyhow::bail!(
-            "RegisterClassW(maskpage.sb) failed: {}",
-            windows::core::Error::from_win32()
-        );
-    }
     let work = crate::frame::bounds(owner);
     let work = if work.has_area() {
         work
@@ -801,15 +787,15 @@ unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
     if r.w() < 40 || r.h() < 40 {
         anyhow::bail!("outside editor has no room");
     }
-    let face = crate::frame::font_face(owner);
+    let face = style().font;
     let wide_face = wide(&face);
-    // Same face/weight as the resize status strip (`frame.font`, 12 px bold).
+    // Monospaced OCR result (`[mask] font`, default Sarasa Term SC Nerd).
     let font = CreateFontW(
         -12,
         0,
         0,
         0,
-        FW_BOLD.0 as i32,
+        FW_NORMAL.0 as i32,
         0,
         0,
         0,
@@ -817,7 +803,7 @@ unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
         OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY,
-        DEFAULT_PITCH.0 as u32,
+        FIXED_PITCH.0 as u32,
         windows::core::PCWSTR(wide_face.as_ptr()),
     );
     let brush = CreateSolidBrush(COLORREF(SELECT_ORANGE));
@@ -840,7 +826,6 @@ unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
         GWLP_USERDATA,
         Box::into_raw(Box::new(PageState {
             edit: HWND::default(),
-            sb: HWND::default(),
             font,
             brush,
             old_edit: 0,
@@ -848,8 +833,7 @@ unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
             redo: Vec::new(),
             last_edit: None,
             last_typing: false,
-            sb_show: false,
-            sb_drag: None,
+            anchor: None,
         })) as isize,
     );
     let edit_style = WINDOW_STYLE(
@@ -882,39 +866,17 @@ unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
         }
     };
     state_userdata(page).edit = edit;
-    let sb = match CreateWindowExW(
-        WINDOW_EX_STYLE(0),
-        sb_class,
-        windows::core::PCWSTR::null(),
-        WS_CHILD | WS_VISIBLE,
-        (r.w() - 16).max(1),
-        6,
-        10,
-        (r.h() - 12).max(1),
-        Some(page),
-        None,
-        Some(instance),
-        None,
-    ) {
-        Ok(sb) => sb,
-        Err(e) => {
-            let _ = DestroyWindow(page);
-            return Err(e.into());
-        }
-    };
-    state_userdata(page).sb = sb;
     SendMessageW(
         edit,
         WM_SETFONT,
         Some(WPARAM(font.0 as usize)),
         Some(LPARAM(1)),
     );
-    let mut text: Vec<u16> = text.encode_utf16().collect();
-    let _ = SetWindowTextW(edit, windows::core::PCWSTR(text.as_mut_ptr()));
+    let text = wide(&edit_newlines(text));
+    let _ = SetWindowTextW(edit, windows::core::PCWSTR(text.as_ptr()));
     SendMessageW(edit, 0x00B1, Some(WPARAM(0)), Some(LPARAM(0))); // EM_SETSEL
     let old = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
     state_userdata(page).old_edit = old;
-    update_scrollbar(page);
     let _ = InvalidateRect(Some(page), None, true);
     logline(&format!(
         "mask: outside editor {}x{} at ({},{})",
@@ -980,15 +942,16 @@ unsafe fn snapshot(edit: HWND) -> UndoSnap {
 
 unsafe fn apply_snapshot(page: HWND, snap: &UndoSnap) {
     let edit = state_userdata(page).edit;
-    let mut text: Vec<u16> = snap.text.encode_utf16().collect();
-    let _ = SetWindowTextW(edit, windows::core::PCWSTR(text.as_mut_ptr()));
+    let text = wide(&snap.text);
+    let _ = SetWindowTextW(edit, windows::core::PCWSTR(text.as_ptr()));
     set_edit_sel(edit, snap.start, snap.end);
     SendMessageW(edit, 0x00B7, None, None); // EM_SCROLLCARET
-    update_scrollbar(page);
+    state_userdata(page).anchor = None;
 }
 
 unsafe fn remember(page: HWND, typing: bool) {
     let s = state_userdata(page);
+    s.anchor = None;
     let now = std::time::Instant::now();
     let coalesce = typing
         && s.last_typing
@@ -1019,6 +982,7 @@ unsafe fn undo(page: HWND) {
     s.redo.push(current);
     s.last_edit = None;
     s.last_typing = false;
+    s.anchor = None;
     apply_snapshot(page, &prev);
 }
 
@@ -1034,6 +998,7 @@ unsafe fn redo(page: HWND) {
     s.undo.push(current);
     s.last_edit = None;
     s.last_typing = false;
+    s.anchor = None;
     apply_snapshot(page, &next);
 }
 
@@ -1113,7 +1078,7 @@ fn prev_token(chars: &[char], from: usize) -> usize {
     i
 }
 
-unsafe fn move_word(page: HWND, dir: i32) {
+unsafe fn move_word(page: HWND, dir: i32, extend: bool) {
     let s = state_userdata(page);
     let text = edit_text(s.edit);
     let chars: Vec<char> = text.chars().collect();
@@ -1125,14 +1090,16 @@ unsafe fn move_word(page: HWND, dir: i32) {
         offsets.push(off);
     }
     let (start, end) = edit_sel(s.edit);
-    let caret = if start == end {
-        end.max(0)
+    let (anchor, head) = if extend {
+        let anchor = s.anchor.unwrap_or(start);
+        let head = if anchor == start { end } else { start };
+        (Some(anchor), head)
     } else {
-        end.max(start)
+        (None, if start == end { end } else { end.max(start) })
     };
     let idx = offsets
         .iter()
-        .position(|&o| o as i32 >= caret)
+        .position(|&o| o as i32 >= head)
         .unwrap_or(chars.len());
     let next = if dir > 0 {
         next_token(&chars, idx)
@@ -1140,28 +1107,18 @@ unsafe fn move_word(page: HWND, dir: i32) {
         prev_token(&chars, idx)
     };
     let target = offsets[next] as i32;
-    // Shift+Ctrl+Arrow stays with the stock EDIT so its selection anchor is
-    // preserved; only the plain word jump is customised.
-    set_edit_sel(s.edit, target, target);
+    match anchor {
+        Some(anchor) => set_edit_sel(s.edit, anchor.min(target), anchor.max(target)),
+        None => set_edit_sel(s.edit, target, target),
+    }
+    s.anchor = anchor;
     SendMessageW(s.edit, 0x00B7, None, None); // EM_SCROLLCARET
-    update_scrollbar(page);
 }
 
 unsafe fn select_all(page: HWND) {
-    let edit = state_userdata(page).edit;
-    set_edit_sel(edit, 0, -1);
-}
-
-unsafe fn line_height(edit: HWND) -> i32 {
-    let dc = GetDC(Some(edit));
-    let mut tm = TEXTMETRICW::default();
-    let ok = GetTextMetricsW(dc, &mut tm).as_bool();
-    let _ = ReleaseDC(Some(edit), dc);
-    if ok {
-        (tm.tmHeight + tm.tmExternalLeading).max(1)
-    } else {
-        16
-    }
+    let s = state_userdata(page);
+    set_edit_sel(s.edit, 0, -1);
+    s.anchor = Some(0);
 }
 
 unsafe fn layout_page(page: HWND) {
@@ -1170,167 +1127,15 @@ unsafe fn layout_page(page: HWND) {
     };
     let mut client = RECT::default();
     let _ = GetClientRect(page, &mut client);
-    let sb_w = if s.sb_show { 10 } else { 0 };
-    let gap = if s.sb_show { 4 } else { 0 };
-    let edit_w = (client.right - 12 - sb_w - gap).max(1);
-    let edit_h = (client.bottom - 12).max(1);
-    let _ = MoveWindow(s.edit, 6, 6, edit_w, edit_h, true);
-    if IsWindow(Some(s.sb)).as_bool() {
-        if s.sb_show {
-            let _ = MoveWindow(s.sb, client.right - 6 - sb_w, 6, sb_w, edit_h, true);
-            let _ = ShowWindow(s.sb, SW_SHOWNA);
-        } else {
-            let _ = ShowWindow(s.sb, SW_HIDE);
-        }
-    }
-}
-
-unsafe fn update_scrollbar(page: HWND) {
-    let Some(s) = page_state(page) else {
-        return;
-    };
-    if !IsWindow(Some(s.edit)).as_bool() {
-        return;
-    }
-    let mut edit_client = RECT::default();
-    let _ = GetClientRect(s.edit, &mut edit_client);
-    let lh = line_height(s.edit);
-    let visible = (edit_client.bottom / lh).max(1);
-    let lines = SendMessageW(s.edit, 0x00BA, None, None).0 as i32; // EM_GETLINECOUNT
-    let show = lines > visible;
-    if show != s.sb_show {
-        s.sb_show = show;
-        layout_page(page);
-    }
-    if IsWindow(Some(s.sb)).as_bool() {
-        let _ = InvalidateRect(Some(s.sb), None, false);
-    }
-}
-
-/// (lines, visible, first, thumb_y, thumb_h) in the scrollbar's client space.
-unsafe fn scroll_metrics(page: HWND) -> Option<(i32, i32, i32, i32, i32)> {
-    let s = page_state(page)?;
-    let mut edit_client = RECT::default();
-    let _ = GetClientRect(s.edit, &mut edit_client);
-    let mut sb_client = RECT::default();
-    let _ = GetClientRect(s.sb, &mut sb_client);
-    let height = sb_client.bottom.max(1);
-    let lh = line_height(s.edit).max(1);
-    let visible = (edit_client.bottom / lh).max(1);
-    let lines = (SendMessageW(s.edit, 0x00BA, None, None).0 as i32).max(1);
-    let first = SendMessageW(s.edit, 0x00CE, None, None).0 as i32; // EM_GETFIRSTVISIBLELINE
-    let thumb_h = (height * visible / lines).max(18).min(height);
-    let max_first = (lines - visible).max(0);
-    let thumb_y = if max_first > 0 && height > thumb_h {
-        (height - thumb_h) * first.clamp(0, max_first) / max_first
-    } else {
-        0
-    };
-    Some((lines, visible, first, thumb_y, thumb_h))
-}
-
-unsafe fn scroll_page(page: HWND, delta: i32) {
-    let Some(s) = page_state(page) else {
-        return;
-    };
-    SendMessageW(
+    let _ = MoveWindow(
         s.edit,
-        0x00B6, // EM_LINESCROLL
-        Some(WPARAM(0)),
-        Some(LPARAM(delta as isize)),
+        6,
+        6,
+        (client.right - 12).max(1),
+        (client.bottom - 12).max(1),
+        true,
     );
-    let _ = InvalidateRect(Some(s.sb), None, false);
 }
-
-unsafe fn scroll_drag(page: HWND, y: i32, offset: i32) {
-    let Some((lines, visible, first, _, thumb_h)) = scroll_metrics(page) else {
-        return;
-    };
-    let Some(s) = page_state(page) else {
-        return;
-    };
-    let mut client = RECT::default();
-    let _ = GetClientRect(s.sb, &mut client);
-    let height = client.bottom.max(1);
-    let max_first = (lines - visible).max(0);
-    let denom = (height - thumb_h).max(1);
-    let top = (y - offset).clamp(0, height - thumb_h);
-    let target = (top as i64 * max_first as i64 / denom as i64) as i32;
-    if target != first {
-        SendMessageW(
-            s.edit,
-            0x00B6,
-            Some(WPARAM(0)),
-            Some(LPARAM((target - first) as isize)),
-        );
-    }
-    let _ = InvalidateRect(Some(s.sb), None, false);
-}
-
-unsafe extern "system" fn sb_wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    let page = GetParent(hwnd).unwrap_or_default();
-    match msg {
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut client = RECT::default();
-            let _ = GetClientRect(hwnd, &mut client);
-            let black = CreateSolidBrush(COLORREF(0));
-            let _ = FillRect(hdc, &client, black);
-            let _ = DeleteObject(black.into());
-            if let Some((_, _, _, thumb_y, thumb_h)) = scroll_metrics(page) {
-                let orange = CreateSolidBrush(COLORREF(SELECT_ORANGE));
-                let thumb = RECT {
-                    left: 1,
-                    top: thumb_y,
-                    right: (client.right - 1).max(2),
-                    bottom: (thumb_y + thumb_h).min(client.bottom),
-                };
-                let _ = FillRect(hdc, &thumb, orange);
-                let _ = DeleteObject(orange.into());
-            }
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
-        }
-        WM_ERASEBKGND => LRESULT(1),
-        WM_LBUTTONDOWN => {
-            let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-            if let Some((_, visible, _, thumb_y, thumb_h)) = scroll_metrics(page) {
-                if y >= thumb_y && y < thumb_y + thumb_h {
-                    if let Some(s) = page_state(page) {
-                        s.sb_drag = Some(y - thumb_y);
-                    }
-                    SetCapture(hwnd);
-                } else {
-                    scroll_page(page, if y < thumb_y { -visible } else { visible });
-                }
-            }
-            LRESULT(0)
-        }
-        WM_MOUSEMOVE => {
-            let dragging = page_state(page).and_then(|s| s.sb_drag);
-            if let Some(offset) = dragging {
-                let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-                scroll_drag(page, y, offset);
-            }
-            LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            if let Some(s) = page_state(page) {
-                s.sb_drag = None;
-            }
-            let _ = ReleaseCapture();
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
 unsafe extern "system" fn edit_proc(
     hwnd: HWND,
     msg: u32,
@@ -1339,6 +1144,9 @@ unsafe extern "system" fn edit_proc(
 ) -> LRESULT {
     let page = GetParent(hwnd).unwrap_or_default();
     let old = state_userdata(page).old_edit;
+    if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK {
+        state_userdata(page).anchor = None;
+    }
     if msg == WM_KEYDOWN {
         let key = VIRTUAL_KEY(wparam.0 as u16);
         if key == VK_ESCAPE {
@@ -1348,6 +1156,18 @@ unsafe extern "system" fn edit_proc(
         let ctrl = GetKeyState(0x11) < 0; // VK_CONTROL
         let shift = GetKeyState(0x10) < 0; // VK_SHIFT
         let alt = GetKeyState(0x12) < 0; // VK_MENU
+        let is_move = matches!(key.0, 0x21..=0x28);
+        if is_move {
+            if shift {
+                let s = state_userdata(page);
+                if s.anchor.is_none() {
+                    let (start, _) = edit_sel(s.edit);
+                    s.anchor = Some(start);
+                }
+            } else {
+                state_userdata(page).anchor = None;
+            }
+        }
         if ctrl && !alt {
             match key.0 {
                 0x41 => {
@@ -1366,12 +1186,12 @@ unsafe extern "system" fn edit_proc(
                     redo(page);
                     return LRESULT(0);
                 }
-                0x25 if !shift => {
-                    move_word(page, -1);
+                0x25 => {
+                    move_word(page, -1, shift);
                     return LRESULT(0);
                 }
-                0x27 if !shift => {
-                    move_word(page, 1);
+                0x27 => {
+                    move_word(page, 1, shift);
                     return LRESULT(0);
                 }
                 _ => {}
@@ -1394,14 +1214,7 @@ unsafe extern "system" fn edit_proc(
         remember(page, true);
     }
     let old: WNDPROC = std::mem::transmute(old);
-    let result = CallWindowProcW(old, hwnd, msg, wparam, lparam);
-    if matches!(
-        msg,
-        WM_KEYDOWN | WM_CHAR | WM_PASTE | WM_CUT | WM_CLEAR | WM_MOUSEWHEEL | 0x0286
-    ) {
-        update_scrollbar(page);
-    }
-    result
+    CallWindowProcW(old, hwnd, msg, wparam, lparam)
 }
 
 unsafe extern "system" fn page_wndproc(
@@ -1432,15 +1245,6 @@ unsafe extern "system" fn page_wndproc(
         }
         WM_SIZE => {
             layout_page(hwnd);
-            update_scrollbar(hwnd);
-            LRESULT(0)
-        }
-        WM_COMMAND => {
-            let code = ((wparam.0 >> 16) & 0xffff) as u32;
-            // EN_CHANGE = 0x0300, EN_VSCROLL = 0x0602.
-            if code == 0x0300 || code == 0x0602 {
-                update_scrollbar(hwnd);
-            }
             LRESULT(0)
         }
         WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_ESCAPE => {
@@ -1457,9 +1261,6 @@ unsafe extern "system" fn page_wndproc(
         }
         WM_DESTROY => {
             if let Some(s) = page_state(hwnd) {
-                if IsWindow(Some(s.sb)).as_bool() {
-                    let _ = DestroyWindow(s.sb);
-                }
                 if IsWindow(Some(s.edit)).as_bool() {
                     let _ = DestroyWindow(s.edit);
                 }
@@ -1729,6 +1530,19 @@ mod tests {
     }
 
     #[test]
+    fn wide_text_is_nul_terminated() {
+        let w = wide("故障abc");
+        assert_eq!(w.last(), Some(&0));
+        assert_eq!(String::from_utf16_lossy(&w[..w.len() - 1]), "故障abc");
+    }
+
+    #[test]
+    fn edit_text_uses_crlf_line_breaks() {
+        assert_eq!(edit_newlines("a\n\nb"), "a\r\n\r\nb");
+        assert_eq!(edit_newlines("a\r\nb"), "a\r\nb");
+    }
+
+    #[test]
     fn outside_joins_lines_and_separates_paragraphs() {
         let words = [
             word_on(0, "Hello", 0, 0, 40, 20),
@@ -1738,6 +1552,7 @@ mod tests {
             word_on(2, "世界", 45, 90, 80, 110),
         ];
         assert_eq!(panel_text(&words), "Hello world again\n\n你好世界");
+        assert_eq!(all_text(&words), panel_text(&words));
     }
 
     #[test]
