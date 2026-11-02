@@ -36,9 +36,13 @@ in `AGENTS.md`; this file is only what is left to build.
   Ctrl+Left/Right (Shift+Ctrl included, line breaks handled), Ctrl+A, no
   scrollbar, and topmost floating when the preferred side is short.
   `editor_test.ps1` passes 15/15; `outside_lines_test.ps1` 2/2;
-  `edit_keys_test.ps1` passes 19/19.
+  `edit_keys_test.ps1` passes 19/19. External-editor experiment moved to
+  `EXPERIMENT.md` (not product code).
 - **P0.6** release packaging (tag workflow, Scoop manifests; the `-ex` hash
   stays empty until the first release).
+- **Notify** optional tray balloon/toast after a manual OCR result or a quick
+  OCR copy; `[notify] enabled` defaults to false and automatic refreshes stay
+  silent. `notify_test.ps1` passes 2/2.
 
 ## P0.7 — OCR result presentation and editing
 
@@ -46,13 +50,9 @@ in `AGENTS.md`; this file is only what is left to build.
   per-word inverse outlines; landscape outside editor sits below the frame,
   portrait to the right, and floats up/left when the side is short; native
   editing keys work (letters, Del, Ctrl+Del, selection), the editor adds
-  undo/redo history, Ctrl+A and token-wise plain Ctrl+Left/Right; the scrollbar
-  is black with an orange thumb; Esc closes.
-- **Notify presentation**: uses the quick-OCR notification settings and defaults
-  to silent.
-- Showing or toggling a window-OCR result turns the frame orange. Result-mode
-  keys reuse the resize key positions but have result-specific meanings:
-  `ctrl+alt+p` pins and enables automatic OCR, then flashes the frame orange once.
+  undo/redo history, Ctrl+A and token-wise plain Ctrl+Left/Right; Esc closes.
+- Done: optional tray notification after a manual OCR result and a quick-OCR
+  copy; silent by default, never on automatic refreshes.
 - **Selection polish**: token-range anchor→head selection, shift/ctrl extend,
   double-click paragraph, Ctrl+A; successful copy flashes cyan twice.
 

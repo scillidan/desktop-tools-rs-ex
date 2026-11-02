@@ -1347,7 +1347,7 @@ unsafe fn finish_selection(hwnd: HWND, start: POINT, end: POINT) {
     }
 }
 
-fn preview(text: &str) -> String {
+pub(crate) fn preview(text: &str) -> String {
     let flat = text.replace(['\r', '\n'], " ");
     if flat.chars().count() > 60 {
         format!("{}…", flat.chars().take(60).collect::<String>())

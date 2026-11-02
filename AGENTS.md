@@ -102,8 +102,8 @@ RegisterHotKey; `ocr.rs` engine routing + Windows OCR fallback; `ocr/auto.rs`
 persistent RapidOCR worker + Tesseract TSV; `scripts/rapidocr_worker.py` embedded
 uv/ONNX worker; `mask.rs` layered mask, box/box+mask/box+outside rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
-Shell_NotifyIconW; `menu.rs` native tray popup; `icon.rs`/`build.rs`
-procedural icon.
+Shell_NotifyIconW; `menu.rs` native tray popup; `icon.rs`/`build.rs` procedural
+icon.
 
 ## Capture sinks
 
@@ -274,7 +274,8 @@ frame per desktop, creates/reuses it on the current desktop's global hotkey,
 and merges duplicates after a desktop closes. `tray.rs` uses
 Shell_NotifyIconW with exe icon resource 1 and a right-click Quit menu; the
 shell sends its callback to the host window, which handles it in its own
-window procedure (see Resident host).
+window procedure (see Resident host). `tray::notify` reuses that icon for the
+optional OCR result balloon.
 `overlay.rs` = red draw band; `capture.rs` = GDI
 → clipboard CF_DIB + CF_BITMAP; `hotkeys.rs` = RegisterHotKey with the
 ported vk map. `~\.temp\opencode\frame_state_test.ps1` verifies background
@@ -379,6 +380,15 @@ paragraph breaks and CRLF in the editor (2 checks); `edit_keys_test.ps1` covers
 Ctrl+Z/Y, Ctrl+A and token-wise Ctrl+Left/Right including Shift+Ctrl across a
 line break (19 checks).
 
+P0.7 status: the result edge is green while a mask or outside editor is open
+(the mask paints it too, because it covers the frame). `box+outside` is the
+native multi-line EDIT described above. `[notify] enabled` (default `false`,
+hot-reloaded) sends one tray balloon/toast after a **manual** OCR result and
+after a successful quick-OCR copy; automatic refreshes stay silent, and
+`NIIF_NOSOUND` keeps the notification quiet when enabled. A missing tray icon
+or a shell refusal only logs a warning. `notify_test.ps1` covers the manual
+result notification (2 checks).
+
 ## Design decisions (the part worth copying into other tools)
 
 | Phase | Decision | Why |
@@ -405,7 +415,8 @@ line break (19 checks).
 | P0.5 | Auto OCR is armed only by `ctrl+shift+alt+o`; `ctrl+alt+s` pauses and drops in-flight results | implicit always-on OCR popped masks while the user was only moving frames; resizing needs the result gone immediately |
 | P0.5 | Auto sampling falls back PrintWindow → PW_RENDERFULLCONTENT → window DC | plain PrintWindow returns an all-black surface on some real apps, which silently disabled change detection |
 | P0.7 | Result state keeps the frame/result edge green until dismissal | the mask covers the frame border, so a one-shot flash was invisible; the mask paints the same edge itself |
-| P0.7 | Outside editor is a stock multi-line EDIT plus a custom scrollbar | native editing/IME/selection stay intact; only undo history, token jumps, Ctrl+A and the black/orange scrollbar are ours |
+| P0.7 | Outside editor is a stock multi-line EDIT plus our undo/token keys | native editing/IME/selection stay intact; only undo history, token jumps, Ctrl+A and the mono font are ours |
+| P0.7 | Notifications are opt-in and never fire on automatic refreshes | the feature is useful for a manual "OCR is ready" beat but becomes noise when auto OCR runs every second |
 | P0.6 | Releases and Scoop manifests use the `-ex` naming; the hash stays empty until the first release | assets and manifest autoupdate must agree; never call an unreleased package installable |
 
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

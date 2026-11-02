@@ -95,6 +95,7 @@ fn run() -> Result<()> {
     mask::set_fill(cfg.mask_fill);
     mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_mode);
     set_capture_dir(&cfg.capture_dir);
+    tray::set_notify(cfg.notify_enabled);
     set_pin_style(cfg.pin_border, cfg.pin_line_color, cfg.pin_hatch_color);
     logline(&format!(
         "config loaded from {} (frame {}x{})",
@@ -180,6 +181,7 @@ fn run() -> Result<()> {
                         }
                         mask::set_fill(new_cfg.mask_fill);
                         set_capture_dir(&new_cfg.capture_dir);
+                        tray::set_notify(new_cfg.notify_enabled);
                         set_pin_style(
                             new_cfg.pin_border,
                             new_cfg.pin_line_color,

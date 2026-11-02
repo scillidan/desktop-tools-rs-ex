@@ -1234,10 +1234,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     if intent == crate::ocr::Intent::Quick {
                         let text = crate::mask::all_text(&words);
                         match crate::capture::copy_text(hwnd, &text) {
-                            Ok(()) => logline(&format!(
-                                "ocr: quick copied {} chars",
-                                text.chars().count()
-                            )),
+                            Ok(()) => {
+                                logline(&format!(
+                                    "ocr: quick copied {} chars",
+                                    text.chars().count()
+                                ));
+                                crate::tray::notify("Quick OCR", &crate::mask::preview(&text));
+                            }
                             Err(e) => logline(&format!("ocr: quick copy failed: {e:#}")),
                         }
                         state(hwnd).pending = Some(PendingResult::HideFrame);
@@ -1307,12 +1310,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = KillTimer(Some(hwnd), 6);
             match state(hwnd).pending.take() {
                 Some(PendingResult::Mask(outcome)) => {
-                    if let Err(e) = crate::mask::show(
-                        hwnd,
-                        outcome.rect,
-                        outcome.words.unwrap_or_default(),
-                        outcome.snapshot,
-                    ) {
+                    let words = outcome.words.unwrap_or_default();
+                    if state(hwnd).ocr_intent == crate::ocr::Intent::Manual {
+                        crate::tray::notify(
+                            "OCR result",
+                            &crate::mask::preview(&crate::mask::all_text(&words)),
+                        );
+                    }
+                    if let Err(e) = crate::mask::show(hwnd, outcome.rect, words, outcome.snapshot) {
                         logline(&format!("mask failed: {e:#}"));
                         set_result(hwnd, false);
                     }

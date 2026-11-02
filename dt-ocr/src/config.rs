@@ -48,6 +48,9 @@ pub struct Config {
     /// Directory for saved captures (env vars expanded); empty = clipboard
     /// only, no file.
     pub capture_dir: String,
+    /// Show a Windows tray notification after a manual OCR result or a quick
+    /// OCR copy. Off by default (silent).
+    pub notify_enabled: bool,
     /// Pin edge decoration: translucent hatch (default), a solid line, or
     /// nothing.
     pub pin_border: PinBorder,
@@ -247,6 +250,7 @@ impl Default for Config {
             mask_font: "Sarasa Term SC Nerd".to_string(),
             mask_size: MaskSize::Pt(10),
             capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
+            notify_enabled: false,
             pin_border: PinBorder::Hatch,
             pin_line_color: 0,
             pin_hatch_color: 0x00ffff,
@@ -421,6 +425,19 @@ pub fn parse(text: &str) -> Result<Config> {
             None => eprintln!("warn: [capture] must be a table; using defaults"),
         }
     }
+    if let Some(notify) = table.get("notify") {
+        match notify.as_table() {
+            Some(t) => {
+                if let Some(v) = t.get("enabled") {
+                    match v.as_bool() {
+                        Some(b) => cfg.notify_enabled = b,
+                        None => eprintln!("warn: notify.enabled must be true/false; using false"),
+                    }
+                }
+            }
+            None => eprintln!("warn: [notify] must be a table; using defaults"),
+        }
+    }
     if let Some(pin) = table.get("pin") {
         match pin.as_table() {
             Some(t) => {
@@ -534,11 +551,23 @@ mod tests {
                 mask_font: "Sarasa Term SC Nerd".to_string(),
                 mask_size: MaskSize::Pt(10),
                 capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
+                notify_enabled: false,
                 pin_border: PinBorder::Hatch,
                 pin_line_color: 0,
                 pin_hatch_color: 0x00ffff,
                 bindings: Bindings::default(),
             }
+        );
+    }
+
+    #[test]
+    fn notify_defaults_to_silent() {
+        assert!(!parse("").unwrap().notify_enabled);
+        assert!(parse("[notify]\nenabled = true\n").unwrap().notify_enabled);
+        assert!(
+            !parse("[notify]\nenabled = \"yes\"\n")
+                .unwrap()
+                .notify_enabled
         );
     }
 

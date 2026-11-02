@@ -49,6 +49,11 @@ size = 10
 [capture]
 dir = "%USERPROFILE%\\Pictures\\dt-ocr"
 
+# Tray notification after a manual OCR result or a quick-OCR copy. Off by
+# default (silent); the tray icon must be present.
+[notify]
+enabled = false
+
 # Pinned-image edge. "hatch" = translucent diagonal shadow (6 px, the
 # default), "line" = one solid pixel using line-color, "none" = no edge.
 # Hovering an edge shows only the resize-arrow cursor in every mode.
