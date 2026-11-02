@@ -12,50 +12,43 @@ in `AGENTS.md`; this file is only what is left to build.
   instance via `Local\dt-ocr.single`; duplicate `WM_HOTKEY`s inside 150 ms are
   dropped so repeated input cannot stack windows.
 - **P0.3** OCR mask: click-through capture, frozen-snapshot overlay with
-  per-word hit-testing, line-band fill, reader layout, `toggle` binding.
+  per-word hit-testing, `box` / `box+mask` / `box+outside` presentations,
+  line-band fill, `toggle` binding. `box+outside` is an editable multi-line
+  orange editor using `frame.font`, preloaded with OCR text. Old `reader` mode
+  removed. A result keeps a green 2 px edge (the mask paints it too,
+  because the mask covers the frame) until dismissal.
 - **P0.4** OCR engines: persistent RapidOCR worker with native character boxes,
   Tesseract TSV words, automatic mixed-script routing and Windows OCR fallback.
   `mask_test.ps1` passes 25/25; `engine_routing_test.ps1` passes 8/8.
-- **P0.5** auto-refresh: hot-reloadable fixed interval and/or on-change triggers,
-  250 ms source-window sampling with two-sample debounce. Static content keeps
-  the same mask; changed content re-OCRs without writing the clipboard.
-  `auto_refresh_test.ps1` passes 7/7.
+- **P0.5** automatic OCR: armed only by `ctrl+shift+alt+o` (existing frame OCRs
+  immediately, no frame draws), `[ocr] auto_delay_ms` debounce (default 1000 ms),
+  250 ms source-window sampling with a PrintWindow → PW_RENDERFULLCONTENT →
+  window-DC render fallback, immediate stale-mask dismissal, re-OCR without
+  writing the clipboard. A second press stops auto OCR and closes the frame;
+  `ctrl+alt+s` pauses and drops any in-flight result while the frame is resized.
+- **P0.5.1** Esc/right-click dismiss a mask while an armed auto session stays
+  armed; yellow resize/status/selection colours replaced with orange.
+- **Quick OCR** `ctrl+alt+o` draws, OCRs, copies the whole text, flashes
+  green and closes the frame. `ocr_actions_test.ps1` passes 22/22.
+- **Outside editor** native EDIT with its own 200-step undo/redo, token-wise
+  Ctrl+Left/Right, Ctrl+A, and a black/orange custom scrollbar.
+  `editor_test.ps1` passes 16/16; `edit_keys_test.ps1` passes 13/13.
 - **P0.6** release packaging (tag workflow, Scoop manifests; the `-ex` hash
   stays empty until the first release).
 
-## P0.5.1 — Auto OCR lifecycle + colour (in progress)
-
-- Esc on an auto-refresh mask dismisses it **and disarms auto OCR**; a later
-  manual OCR arms it again. Changing source content dismisses the stale mask
-  immediately, then performs the debounced re-OCR and shows the new mask.
-- Replace the existing yellow resize/status/selection colours with orange;
-  configured colour names remain unaffected.
-
-## P1.1 — Drag-select quick OCR (next)
-
-- `ctrl+alt+o` draws a region and OCRs it directly. On completion the frame
-  flashes orange once and hides; the recognised text is copied to the clipboard.
-- Completion uses a system notification or a configured third-party notifier;
-  `[notify]` supports silent operation. Reuse the existing engines and joining.
-- `ctrl+alt+w` then Ctrl+Enter remains the distinct **window OCR** workflow.
-
 ## P0.7 — OCR result presentation and editing
 
-- **Four presentations**: `box` (default) leaves source text unchanged and shows
-  an orange outline on click/selection; `box+mask` uses the configured font and
-  automatically inverted text/backing colours for extreme light/dark sources,
-  with an inverse-colour selection outline; `box+outside` puts a resize-like
-  colour bar outside the frame with configured-font black text preserving lines
-  and paragraphs; `notify` uses the quick-OCR notification settings and defaults
-  to silent. The old `reader` mode is removed.
-- Outside placement follows frame orientation: landscape prefers above/below,
-  portrait prefers left/right; if both sides lack space, use the roomier side
-  and align the floating panel to the available edge.
+- Done: `box`, `box+mask` and `box+outside`, with inverse-colour bands/text and
+  per-word inverse outlines; landscape outside editor sits below the frame,
+  portrait to the right, and floats up/left when the side is short; native
+  editing keys work (letters, Del, Ctrl+Del, selection), the editor adds
+  undo/redo history, Ctrl+A and token-wise plain Ctrl+Left/Right; the scrollbar
+  is black with an orange thumb; Esc closes.
+- **Notify presentation**: uses the quick-OCR notification settings and defaults
+  to silent.
 - Showing or toggling a window-OCR result turns the frame orange. Result-mode
   keys reuse the resize key positions but have result-specific meanings:
-  `ctrl+alt+p` pins and enables auto OCR, then flashes the frame orange once.
-- In outside mode, Ctrl+I edits the OCR text in place with basic editing keys;
-  Esc leaves editing. Keep the existing per-line copy rules.
+  `ctrl+alt+p` pins and enables automatic OCR, then flashes the frame orange once.
 - **Selection polish**: token-range anchor→head selection, shift/ctrl extend,
   double-click paragraph, Ctrl+A; successful copy flashes cyan twice.
 

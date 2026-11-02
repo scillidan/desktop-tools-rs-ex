@@ -1,6 +1,6 @@
 //! P0.5 automatic refresh. Sampling happens on the existing host timer; OCR
-//! stays on its worker thread. A manual capture arms the loop, so merely
-//! starting dt-ocr or showing a frame never starts recognition.
+//! stays on its worker thread. Automatic mode is armed only by the
+//! `ctrl+shift+alt+o` action; drawing or moving a frame never starts it.
 
 use crate::config::OcrAuto;
 use crate::logline;
@@ -14,29 +14,29 @@ const SAMPLE_W: usize = 48;
 const SAMPLE_H: usize = 27;
 const PIXEL_DELTA: u8 = 32;
 const CHANGE_FRACTION: f32 = 0.005;
-const MIN_REFRESH: Duration = Duration::from_millis(500);
 
 struct State {
     config: OcrAuto,
+    armed: bool,
     frame: isize,
     baseline: Vec<u8>,
-    pending_changes: u8,
+    changed_at: Option<Instant>,
     busy: bool,
     last_start: Option<Instant>,
+    sample_failed: bool,
 }
 
 impl State {
     const fn new() -> Self {
         Self {
-            config: OcrAuto {
-                every_ms: None,
-                on_change: false,
-            },
+            config: OcrAuto { delay_ms: 1000 },
+            armed: false,
             frame: 0,
             baseline: Vec::new(),
-            pending_changes: 0,
+            changed_at: None,
             busy: false,
             last_start: None,
+            sample_failed: false,
         }
     }
 }
@@ -47,20 +47,34 @@ fn state() -> std::sync::MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A user dismissal leaves the configured auto mode intact but disarms this
-/// frame until the next manual OCR. Internal stale-mask dismissal must not call
-/// this, or a change-triggered refresh would cancel itself.
-pub fn disarm() {
-    let mut s = state();
-    s.frame = 0;
-    s.baseline.clear();
-    s.pending_changes = 0;
-}
-
 pub fn set_auto(config: OcrAuto) {
     let mut s = state();
     s.config = config;
-    s.pending_changes = 0;
+    s.changed_at = None;
+}
+
+pub fn auto_enabled() -> bool {
+    state().armed
+}
+
+/// Arm automatic OCR for `frame`; the next tick establishes the baseline.
+pub fn enable_auto(frame: HWND) {
+    let mut s = state();
+    s.armed = true;
+    s.frame = frame.0 as isize;
+    s.baseline.clear();
+    s.changed_at = None;
+    s.busy = false;
+    s.sample_failed = false;
+}
+
+pub fn disable_auto() {
+    let mut s = state();
+    s.armed = false;
+    s.frame = 0;
+    s.baseline.clear();
+    s.changed_at = None;
+    s.sample_failed = false;
 }
 
 pub(super) fn before_start(frame: HWND, snapshot: &Snapshot) {
@@ -70,7 +84,7 @@ pub(super) fn before_start(frame: HWND, snapshot: &Snapshot) {
     let mut s = state();
     s.frame = frame.0 as isize;
     s.baseline = baseline;
-    s.pending_changes = 0;
+    s.changed_at = None;
     s.busy = true;
     s.last_start = Some(Instant::now());
 }
@@ -83,14 +97,15 @@ pub(crate) fn finished(frame: HWND) {
         if let Some(baseline) = baseline {
             s.baseline = baseline;
         }
-        s.busy = false;
     }
+    s.busy = false;
+    s.changed_at = None;
 }
 
 /// Host timer entry point. It only samples after a manual capture armed it.
 unsafe fn sample(rect: RECT) -> Result<Vec<u8>> {
     // shortcut: on-change needs one containing source window; multi-window
-    // regions can use every_ms, upgrade to per-window compositing if needed.
+    // regions are sampled as one rect, upgrade to per-window compositing if needed.
     let (width, height, bgra) = crate::capture::print_source(rect)?;
     let sampled = fingerprint(&Snapshot {
         width,
@@ -107,75 +122,86 @@ unsafe fn sample(rect: RECT) -> Result<Vec<u8>> {
     Ok(sampled)
 }
 
-/// Host timer entry point. It only samples after a manual capture armed it.
-pub unsafe fn auto_tick() {
-    let (config, frame, every_due) = {
-        let s = state();
-        if !s.config.enabled() || s.frame == 0 || s.busy {
-            return;
-        }
-        let elapsed = s.last_start.map(|t| t.elapsed()).unwrap_or_default();
-        let every_due = s
-            .config
-            .every_ms
-            .is_some_and(|ms| elapsed >= Duration::from_millis(ms));
-        if !every_due && (!s.config.on_change || elapsed < MIN_REFRESH) {
-            return;
-        }
-        (s.config, HWND(s.frame as *mut core::ffi::c_void), every_due)
-    };
+/// Host timer entry point. Auto OCR is always active for a visible frame; the
+/// first observed frame only establishes the comparison baseline.
+pub unsafe fn auto_tick(frame: HWND) {
+    if !auto_enabled() || frame.0.is_null() {
+        return;
+    }
     let Some(rect) = crate::frame::visible_rect(frame) else {
-        return;
-    };
-    if every_due {
-        logline("ocr: auto refresh (interval)");
-        crate::mask::dismiss();
-        if let Err(e) = super::start(frame) {
-            logline(&format!("warn: auto OCR failed: {e:#}"));
+        let mut s = state();
+        if s.frame == frame.0 as isize {
+            s.frame = 0;
+            s.baseline.clear();
+            s.changed_at = None;
+            s.sample_failed = false;
         }
         return;
-    }
-    if !config.on_change {
-        return;
-    }
-    // Fallback for pre-2004 Windows: do not ever OCR our own mask. Newer
-    // systems exclude it through WDA_EXCLUDEFROMCAPTURE without hiding it.
-    if crate::mask::visible_without_capture_exclusion() {
-        crate::mask::dismiss();
-    }
-    let sampled = sample(rect);
-    let changed = match sampled {
+    };
+    let current = match sample(rect) {
         Ok(current) => {
             let mut s = state();
-            if s.frame != frame.0 as isize || s.busy {
-                return;
-            }
-            let changed = materially_changed(&s.baseline, &current);
-            if changed && s.pending_changes == 0 {
-                // The old result is stale now, not two samples from now. This
-                // internal dismissal deliberately leaves auto armed.
-                crate::mask::dismiss();
-                logline("ocr: auto source changing; stale mask dismissed");
-            }
-            s.pending_changes = if changed {
-                s.pending_changes.saturating_add(1)
-            } else {
-                0
-            };
-            if s.pending_changes < 2 {
-                return;
-            }
-            s.pending_changes = 0;
-            changed
+            s.sample_failed = false;
+            drop(s);
+            current
         }
         Err(e) => {
-            logline(&format!("warn: auto sample failed: {e:#}"));
+            let mut s = state();
+            if !s.sample_failed {
+                s.sample_failed = true;
+                drop(s);
+                logline(&format!("warn: auto sample failed: {e:#}"));
+            }
             return;
         }
     };
-    if changed {
-        logline("ocr: auto refresh (source changed)");
-        crate::mask::dismiss();
+    let (delay, due) = {
+        let mut s = state();
+        if s.busy {
+            return;
+        }
+        if s.frame != frame.0 as isize || s.baseline.is_empty() {
+            s.frame = frame.0 as isize;
+            s.baseline = current;
+            s.changed_at = None;
+            return;
+        }
+        let changed = materially_changed(&s.baseline, &current);
+        if !changed {
+            s.changed_at = None;
+            return;
+        }
+        let now = Instant::now();
+        if s.changed_at.is_none() {
+            // The old result is stale now, not after the debounce. This
+            // internal dismissal leaves auto active.
+            s.changed_at = Some(now);
+            drop(s);
+            crate::mask::dismiss();
+            logline("ocr: auto source changing; stale mask dismissed");
+            let s = state();
+            if s.busy {
+                return;
+            }
+            let delay = Duration::from_millis(s.config.delay_ms.max(100));
+            (delay, false)
+        } else {
+            let delay = Duration::from_millis(s.config.delay_ms.max(100));
+            let changed_for = s.changed_at.map(|t| t.elapsed()).unwrap_or_default();
+            let since_ocr = s.last_start.map(|t| t.elapsed()).unwrap_or_default();
+            if refresh_due(changed_for, since_ocr, delay) {
+                s.changed_at = None;
+                (delay, true)
+            } else {
+                (delay, false)
+            }
+        }
+    };
+    if due {
+        logline(&format!(
+            "ocr: auto refresh (source changed, delay {delay:?})"
+        ));
+        crate::frame::prepare_ocr(frame, super::Intent::Auto, false);
         if let Err(e) = super::start(frame) {
             logline(&format!("warn: auto OCR failed: {e:#}"));
         }
@@ -221,6 +247,10 @@ fn materially_changed(before: &[u8], after: &[u8]) -> bool {
     change_fraction(before, after) >= CHANGE_FRACTION
 }
 
+fn refresh_due(changed_for: Duration, since_ocr: Duration, delay: Duration) -> bool {
+    changed_for >= delay && since_ocr >= delay
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,12 +289,37 @@ mod tests {
     }
 
     #[test]
-    fn auto_is_disabled_by_default() {
-        assert!(!OcrAuto::default().enabled());
-        assert!(OcrAuto {
-            every_ms: None,
-            on_change: true
-        }
-        .enabled());
+    fn auto_arms_only_on_demand() {
+        disable_auto();
+        assert!(!auto_enabled());
+        enable_auto(HWND(std::ptr::null_mut()));
+        assert!(auto_enabled());
+        disable_auto();
+        assert!(!auto_enabled());
+    }
+
+    #[test]
+    fn auto_is_enabled_with_a_default_delay() {
+        assert_eq!(OcrAuto::default().delay_ms, 1000);
+    }
+
+    #[test]
+    fn refresh_waits_for_both_change_and_ocr_delay() {
+        let delay = Duration::from_millis(1000);
+        assert!(!refresh_due(
+            Duration::from_millis(999),
+            Duration::from_millis(2000),
+            delay
+        ));
+        assert!(!refresh_due(
+            Duration::from_millis(2000),
+            Duration::from_millis(999),
+            delay
+        ));
+        assert!(refresh_due(
+            Duration::from_millis(1000),
+            Duration::from_millis(1000),
+            delay
+        ));
     }
 }

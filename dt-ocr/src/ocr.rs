@@ -11,7 +11,7 @@ mod auto;
 mod external;
 
 pub(crate) use auto::finished;
-pub use auto::{auto_tick, disarm as auto_disarm, set_auto};
+pub use auto::{auto_enabled, auto_tick, disable_auto, enable_auto, set_auto};
 
 use crate::config::OcrBackend;
 use crate::logline;
@@ -30,9 +30,22 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::WinRT::{IBufferByteAccess, RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
+/// What started the current OCR run; the result handling differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Intent {
+    /// Ctrl+Enter / internal WS_OCR_START: show the mask.
+    Manual,
+    /// Ctrl+Alt+O: copy the text, flash, then close the frame.
+    Quick,
+    /// Ctrl+Shift+Alt+O and its automatic refreshes: show the mask.
+    Auto,
+}
+
 /// Worker → UI thread: recognition finished, `lparam` is `Box<Outcome>`.
 pub const WM_OCR_START: u32 = WM_APP;
 pub const WM_OCR_DONE: u32 = WM_APP + 1;
+
+static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 static ENGINE: RwLock<OcrBackend> = RwLock::new(OcrBackend::Auto);
 
@@ -63,6 +76,8 @@ pub struct Snapshot {
 }
 
 pub struct Outcome {
+    /// Generation of the run that produced this result.
+    pub seq: u64,
     /// The frame rect the words belong to (the mask window's screen rect).
     pub rect: Rect,
     pub snapshot: Snapshot,
@@ -82,8 +97,11 @@ const MAX_OCR_PIXELS: u64 = 16_000_000;
 const FALLBACK_MAX_DIM: u32 = 4096;
 
 /// Capture the frame region, mark the frame click-through and start the
-/// worker. Returns immediately; the result arrives as [`WM_OCR_DONE`].
-pub unsafe fn start(frame: HWND) -> Result<()> {
+/// worker. Returns immediately with the run's generation; the result arrives
+/// as [`WM_OCR_DONE`].
+pub unsafe fn start(frame: HWND) -> Result<u64> {
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    crate::frame::note_ocr_start(frame, seq);
     let rect = crate::frame::screen_rect(frame);
     ensure!(
         rect.w() > BORDER * 2 && rect.h() > BORDER * 2,
@@ -127,6 +145,7 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
             words
         });
         let outcome = Box::into_raw(Box::new(Outcome {
+            seq,
             rect,
             snapshot,
             words,
@@ -144,7 +163,7 @@ pub unsafe fn start(frame: HWND) -> Result<()> {
             auto::finished(frame);
         }
     });
-    Ok(())
+    Ok(seq)
 }
 
 /// Upscale the capture by the configured factor, clamped so the engine and

@@ -93,7 +93,7 @@ fn run() -> Result<()> {
     ocr::set_engine(cfg.ocr_engine);
     ocr::set_auto(cfg.ocr_auto);
     mask::set_fill(cfg.mask_fill);
-    mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_layout);
+    mask::set_style(cfg.mask_font.clone(), cfg.mask_size, cfg.mask_mode);
     set_capture_dir(&cfg.capture_dir);
     set_pin_style(cfg.pin_border, cfg.pin_line_color, cfg.pin_hatch_color);
     logline(&format!(
@@ -188,7 +188,7 @@ fn run() -> Result<()> {
                         mask::set_style(
                             new_cfg.mask_font.clone(),
                             new_cfg.mask_size,
-                            new_cfg.mask_layout,
+                            new_cfg.mask_mode,
                         );
                         cfg = new_cfg;
                     }
@@ -199,7 +199,14 @@ fn run() -> Result<()> {
         unsafe {
             if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_TIMER && msg.wParam.0 == 1
             {
-                ocr::auto_tick();
+                let visible = frames
+                    .all()
+                    .iter()
+                    .copied()
+                    .find(|&h| frame::visible_rect(h).is_some());
+                if let Some(frame) = visible {
+                    ocr::auto_tick(frame);
+                }
             }
             let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
             windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
@@ -230,60 +237,111 @@ fn reload(cfg_path: &std::path::Path) -> Result<config::Config> {
 }
 
 fn dispatch(action: Action, frame: HWND) {
-    // Drawing replaces the old region, so hide it instead of flashing it; every
-    // other command summons a frame that was closed from the taskbar.
+    let visible = unsafe { frame::visible_rect(frame).is_some() };
+    // Only the commands that create or place a frame may run without one.
+    if !visible
+        && matches!(
+            action,
+            Action::Resize | Action::Pin | Action::Capture | Action::Move | Action::Toggle
+        )
+    {
+        logline(&format!(
+            "{} ignored: no frame (use draw or frame_window)",
+            action.name()
+        ));
+        return;
+    }
     unsafe {
         match action {
             Action::Draw => {
                 frame::hide(frame);
                 mask::dismiss();
-            }
-            // The pin only uses a frame that is already on screen; bringing a
-            // hidden one back would pin the wrong thing.
-            Action::PinShot => {}
-            _ => frame::ensure_visible(frame),
-        }
-    }
-    match action {
-        Action::Draw => {
-            if let Err(e) = unsafe { overlay::begin() } {
-                logline(&format!("draw failed: {e:#}"));
-            }
-        }
-        Action::Resize => unsafe { frame::begin_spec(frame) },
-        Action::Pin => unsafe { frame::toggle_pin(frame) },
-        Action::Move => unsafe { frame::to_move(frame) },
-        Action::Toggle => unsafe { mask::toggle() },
-        Action::Capture => {
-            // Read the real screen: a previous mask would be re-captured.
-            unsafe { mask::dismiss() };
-            if let Err(e) = unsafe { capture::capture_frame(frame) } {
-                logline(&format!("capture failed: {e:#}"));
-            } else {
-                unsafe { frame::flash_capture(frame) };
-                // P0.3: copy the image (above) AND read the words into the
-                // overlay. OCR runs on a worker thread; the frame is
-                // click-through until the mask takes over.
-                if let Err(e) = unsafe { ocr::start(frame) } {
-                    logline(&format!("ocr capture failed: {e:#}"));
+                if let Err(e) = overlay::begin(overlay::Intent::Frame) {
+                    logline(&format!("draw failed: {e:#}"));
                 }
             }
-        }
-        // Frame the window the user is looking at: the frame becomes the region
-        // for OCR/capture without a manual drag.
-        Action::FrameWindow => match unsafe { capture::window_target() } {
-            Ok(rect) => unsafe {
+            Action::QuickOcr => {
+                frame::hide(frame);
                 mask::dismiss();
-                frame::place(frame, frame::rect_of(rect));
+                if let Err(e) = overlay::begin(overlay::Intent::QuickOcr) {
+                    logline(&format!("quick OCR draw failed: {e:#}"));
+                }
+            }
+            Action::AutoOcr => {
+                // Second press ends the session: no more refreshes, frame gone.
+                if ocr::auto_enabled() {
+                    ocr::disable_auto();
+                    mask::dismiss();
+                    frame::hide(frame);
+                    logline("auto OCR: off");
+                    return;
+                }
+                if !visible {
+                    if let Err(e) = overlay::begin(overlay::Intent::AutoOcr) {
+                        logline(&format!("auto OCR draw failed: {e:#}"));
+                    }
+                    return;
+                }
+                mask::dismiss();
+                frame::prepare_ocr(frame, ocr::Intent::Auto, true);
+                ocr::enable_auto(frame);
+                if let Err(e) = ocr::start(frame) {
+                    logline(&format!("auto OCR failed: {e:#}"));
+                    ocr::disable_auto();
+                }
+                logline("auto OCR: on");
+            }
+            Action::Resize => {
+                // Pause any OCR session and drop an in-flight result: the
+                // user is adjusting the frame, not reading it.
+                mask::dismiss();
+                frame::pause_ocr(frame);
+                frame::ensure_visible(frame);
+                frame::begin_spec(frame);
+            }
+            Action::Pin => {
+                frame::ensure_visible(frame);
+                frame::toggle_pin(frame);
+            }
+            Action::Move => {
+                frame::ensure_visible(frame);
                 frame::to_move(frame);
-                logline(&format!("frame: window at {rect:?}"));
-            },
-            Err(e) => logline(&format!("frame window failed: {e:#}")),
-        },
-        // Pin what the frame covers; without a frame, pin the focused window.
-        Action::PinShot => {
-            let r = unsafe {
-                match frame::visible_rect(frame) {
+            }
+            Action::Toggle => mask::toggle(),
+            Action::Capture => {
+                // Read the real screen: a previous mask would be re-captured.
+                mask::dismiss();
+                if let Err(e) = capture::capture_frame(frame) {
+                    logline(&format!("capture failed: {e:#}"));
+                } else {
+                    frame::flash_capture(frame);
+                    frame::prepare_ocr(frame, ocr::Intent::Manual, true);
+                    // P0.3: copy the image (above) AND read the words into the
+                    // overlay. OCR runs on a worker thread; the frame is
+                    // click-through until the mask takes over.
+                    if let Err(e) = ocr::start(frame) {
+                        logline(&format!("ocr capture failed: {e:#}"));
+                    }
+                }
+            }
+            // Frame the window the user is looking at: the frame becomes the
+            // region for OCR/capture without a manual drag.
+            Action::FrameWindow => {
+                ocr::disable_auto();
+                mask::dismiss();
+                match capture::window_target() {
+                    Ok(rect) => {
+                        frame::place(frame, frame::rect_of(rect));
+                        frame::to_move(frame);
+                        logline(&format!("frame: window at {rect:?}"));
+                    }
+                    Err(e) => logline(&format!("frame window failed: {e:#}")),
+                }
+            }
+            // Pin what the frame covers; without a frame, pin the focused
+            // window (this action intentionally needs no frame).
+            Action::PinShot => {
+                let r = match frame::visible_rect(frame) {
                     Some(rect) => {
                         // Hide first: our own border must not be in the image.
                         frame::hide(frame);
@@ -294,10 +352,10 @@ fn dispatch(action: Action, frame: HWND) {
                         r
                     }
                     None => capture::pin_window(pin_style()),
+                };
+                if let Err(e) = r {
+                    logline(&format!("pin shot failed: {e:#}"));
                 }
-            };
-            if let Err(e) = r {
-                logline(&format!("pin shot failed: {e:#}"));
             }
         }
     }

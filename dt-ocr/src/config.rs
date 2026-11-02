@@ -26,7 +26,7 @@ pub struct Config {
     /// OCR backend: auto = RapidOCR + Tesseract Latin correction, falling
     /// back to Windows OCR when the external engine is unavailable.
     pub ocr_engine: OcrBackend,
-    /// Automatic re-OCR after the first manual capture. Disabled by default.
+    /// Automatic re-OCR delay after the frame's source content changes.
     pub ocr_auto: OcrAuto,
     /// Recognizer language tag (`zh`, `en`, `zh-Hans-CN`, ...). `None` =
     /// auto: prefer a CJK pack, then English. A tag that is not installed
@@ -36,9 +36,10 @@ pub struct Config {
     /// geometry) or one continuous band per OCR line segment (words keep
     /// their exact positions; only the gaps between them are filled).
     pub mask_fill: MaskFill,
-    /// Mask text layout: `overlay` keeps the original geometry, `reader`
-    /// reflows the text as one wrapped document.
-    pub mask_layout: MaskLayout,
+    /// Mask presentation: source pixels only (`box`), recoloured text bands
+    /// (`box+mask`), or source pixels plus an external preview bar
+    /// (`box+outside`).
+    pub mask_mode: MaskMode,
     /// Mask font face (default = the dotfiles WezTerm font, Sarasa Term SC
     /// Nerd, so re-rendered text matches the terminal).
     pub mask_font: String,
@@ -64,17 +65,15 @@ pub enum OcrBackend {
     Tesseract,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OcrAuto {
-    /// Fixed refresh interval; `None` disables time-based refreshes.
-    pub every_ms: Option<u64>,
-    /// Re-OCR after the sampled source pixels change materially.
-    pub on_change: bool,
+    /// Debounce after a material source change before the re-OCR starts.
+    pub delay_ms: u64,
 }
 
-impl OcrAuto {
-    pub fn enabled(self) -> bool {
-        self.every_ms.is_some() || self.on_change
+impl Default for OcrAuto {
+    fn default() -> Self {
+        Self { delay_ms: 1000 }
     }
 }
 
@@ -92,9 +91,10 @@ pub enum MaskFill {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaskLayout {
-    Overlay,
-    Reader,
+pub enum MaskMode {
+    Box,
+    BoxMask,
+    BoxOutside,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +115,8 @@ pub struct Bindings {
     pub pin_shot: Combo,
     pub r#move: Combo,
     pub toggle: Combo,
+    pub quick_ocr: Combo,
+    pub auto_ocr: Combo,
 }
 
 /// Frame actions a binding can trigger (hotkey ids index into this order).
@@ -128,10 +130,12 @@ pub enum Action {
     PinShot,
     Move,
     Toggle,
+    QuickOcr,
+    AutoOcr,
 }
 
 impl Action {
-    pub const ALL: [Action; 8] = [
+    pub const ALL: [Action; 10] = [
         Action::Draw,
         Action::Resize,
         Action::Pin,
@@ -140,6 +144,8 @@ impl Action {
         Action::PinShot,
         Action::Move,
         Action::Toggle,
+        Action::QuickOcr,
+        Action::AutoOcr,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -151,6 +157,8 @@ impl Action {
             Action::PinShot => "pin_shot",
             Action::Move => "move",
             Action::Toggle => "toggle",
+            Action::QuickOcr => "quick_ocr",
+            Action::AutoOcr => "auto_ocr",
         }
     }
     fn default_combo(self) -> Combo {
@@ -167,6 +175,8 @@ impl Action {
             // Win+O is reserved by Windows (orientation lock; RegisterHotKey
             // fails with 1409), Win+Shift+O is free.
             Action::Toggle => "win+shift+o".parse().unwrap(),
+            Action::QuickOcr => "ctrl+alt+o".parse().unwrap(),
+            Action::AutoOcr => "ctrl+shift+alt+o".parse().unwrap(),
         }
     }
     pub(crate) fn get(self, b: &Bindings) -> Combo {
@@ -179,6 +189,8 @@ impl Action {
             Action::PinShot => b.pin_shot,
             Action::Move => b.r#move,
             Action::Toggle => b.toggle,
+            Action::QuickOcr => b.quick_ocr,
+            Action::AutoOcr => b.auto_ocr,
         }
     }
     pub(crate) fn set(self, b: &mut Bindings, c: Combo) {
@@ -191,6 +203,8 @@ impl Action {
             Action::PinShot => b.pin_shot = c,
             Action::Move => b.r#move = c,
             Action::Toggle => b.toggle = c,
+            Action::QuickOcr => b.quick_ocr = c,
+            Action::AutoOcr => b.auto_ocr = c,
         }
     }
 }
@@ -206,6 +220,8 @@ impl Default for Bindings {
             pin_shot: Combo::default(),
             r#move: Combo::default(),
             toggle: Combo::default(),
+            quick_ocr: Combo::default(),
+            auto_ocr: Combo::default(),
         };
         for a in Action::ALL {
             a.set(&mut b, a.default_combo());
@@ -227,7 +243,7 @@ impl Default for Config {
             ocr_auto: OcrAuto::default(),
             ocr_language: None,
             mask_fill: MaskFill::Lines,
-            mask_layout: MaskLayout::Overlay,
+            mask_mode: MaskMode::Box,
             mask_font: "Sarasa Term SC Nerd".to_string(),
             mask_size: MaskSize::Pt(10),
             capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
@@ -258,41 +274,6 @@ fn parse_color(s: &str) -> Option<u32> {
             .filter(|h| h.len() == 6)
             .and_then(|h| u32::from_str_radix(h, 16).ok())
     })
-}
-
-fn parse_auto(v: &toml::Value) -> OcrAuto {
-    if v.as_bool() == Some(false) {
-        return OcrAuto::default();
-    }
-    let Some(t) = v.as_table() else {
-        eprintln!("warn: ocr.auto must be false or an inline table; using false");
-        return OcrAuto::default();
-    };
-    let every_ms = match t.get("every_ms") {
-        None => None,
-        Some(v) => match v.as_integer() {
-            Some(0) => None,
-            Some(n) if (250..=60_000).contains(&n) => Some(n as u64),
-            _ => {
-                eprintln!("warn: ocr.auto.every_ms must be 0 or 250..=60000; disabling interval");
-                None
-            }
-        },
-    };
-    let on_change = match t.get("on_change") {
-        None => false,
-        Some(v) => match v.as_bool() {
-            Some(b) => b,
-            None => {
-                eprintln!("warn: ocr.auto.on_change must be true/false; using false");
-                false
-            }
-        },
-    };
-    OcrAuto {
-        every_ms,
-        on_change,
-    }
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -372,8 +353,11 @@ pub fn parse(text: &str) -> Result<Config> {
                         None => eprintln!("warn: ocr.language must be a string; using auto"),
                     }
                 }
-                if let Some(v) = t.get("auto") {
-                    cfg.ocr_auto = parse_auto(v);
+                if let Some(v) = t.get("auto_delay_ms") {
+                    match v.as_integer() {
+                        Some(n) if (100..=60_000).contains(&n) => cfg.ocr_auto.delay_ms = n as u64,
+                        _ => eprintln!("warn: ocr.auto_delay_ms must be 100..=60000; using 1000"),
+                    }
                 }
             }
             None => eprintln!("warn: [ocr] must be a table; using defaults"),
@@ -391,12 +375,13 @@ pub fn parse(text: &str) -> Result<Config> {
                         }
                     }
                 }
-                if let Some(v) = t.get("layout") {
+                if let Some(v) = t.get("mode") {
                     match v.as_str() {
-                        Some("overlay") => cfg.mask_layout = MaskLayout::Overlay,
-                        Some("reader") => cfg.mask_layout = MaskLayout::Reader,
+                        Some("box") => cfg.mask_mode = MaskMode::Box,
+                        Some("box+mask") => cfg.mask_mode = MaskMode::BoxMask,
+                        Some("box+outside") => cfg.mask_mode = MaskMode::BoxOutside,
                         _ => eprintln!(
-                            "warn: mask.layout must be \"overlay\" or \"reader\"; using overlay"
+                            "warn: mask.mode must be \"box\", \"box+mask\" or \"box+outside\"; using box"
                         ),
                     }
                 }
@@ -512,21 +497,20 @@ mod tests {
     #[test]
     fn auto_refresh_config_parses() {
         assert_eq!(parse("").unwrap().ocr_auto, OcrAuto::default());
+        assert_eq!(parse("").unwrap().ocr_auto.delay_ms, 1000);
         assert_eq!(
-            parse("[ocr]\nauto = { every_ms = 1000, on_change = true }")
-                .unwrap()
-                .ocr_auto,
-            OcrAuto {
-                every_ms: Some(1000),
-                on_change: true
-            }
-        );
-        assert_eq!(
-            parse("[ocr]\nauto = { every_ms = 0, on_change = true }")
+            parse("[ocr]\nauto_delay_ms = 2500")
                 .unwrap()
                 .ocr_auto
-                .every_ms,
-            None
+                .delay_ms,
+            2500
+        );
+        assert_eq!(
+            parse("[ocr]\nauto_delay_ms = 10")
+                .unwrap()
+                .ocr_auto
+                .delay_ms,
+            1000
         );
     }
 
@@ -546,7 +530,7 @@ mod tests {
                 ocr_auto: OcrAuto::default(),
                 ocr_language: None,
                 mask_fill: MaskFill::Lines,
-                mask_layout: MaskLayout::Overlay,
+                mask_mode: MaskMode::Box,
                 mask_font: "Sarasa Term SC Nerd".to_string(),
                 mask_size: MaskSize::Pt(10),
                 capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
@@ -616,6 +600,14 @@ mod tests {
         // Untouched actions keep their defaults.
         assert_eq!(cfg.bindings.pin, Action::Pin.default_combo());
         assert_eq!(cfg.bindings.capture, Action::Capture.default_combo());
+        assert_eq!(
+            cfg.bindings.quick_ocr,
+            "ctrl+alt+o".parse::<Combo>().unwrap()
+        );
+        assert_eq!(
+            cfg.bindings.auto_ocr,
+            "ctrl+shift+alt+o".parse::<Combo>().unwrap()
+        );
     }
 
     #[test]
@@ -661,8 +653,9 @@ mod tests {
 
     #[test]
     fn mask_style_parses() {
-        let cfg = parse("[mask]\nlayout = \"reader\"\nfont = \"Consolas\"\nsize = 12\n").unwrap();
-        assert_eq!(cfg.mask_layout, MaskLayout::Reader);
+        let cfg =
+            parse("[mask]\nmode = \"box+outside\"\nfont = \"Consolas\"\nsize = 12\n").unwrap();
+        assert_eq!(cfg.mask_mode, MaskMode::BoxOutside);
         assert_eq!(cfg.mask_font, "Consolas");
         assert_eq!(cfg.mask_size, MaskSize::Pt(12));
         assert_eq!(
@@ -679,8 +672,8 @@ mod tests {
             MaskSize::Pt(10)
         );
         assert_eq!(
-            parse("[mask]\nlayout = \"page\"\n").unwrap().mask_layout,
-            MaskLayout::Overlay
+            parse("[mask]\nmode = \"reader\"\n").unwrap().mask_mode,
+            MaskMode::Box
         );
     }
 

@@ -1,14 +1,16 @@
-//! P0.3 overlay mask: one topmost layered window over the frame region,
+//! P0.3/P0.7 overlay mask: one topmost layered window over the frame region,
 //! rendered per-pixel through `UpdateLayeredWindow`. Untouched pixels come
 //! from the native-resolution snapshot captured with the OCR image, so screen
-//! changes cannot misalign the mask. OCR words get black backing boxes and
-//! white glyphs. Click copies a word; drag copies a selection; Esc dismisses.
+//! changes cannot misalign the mask. `box` leaves source pixels untouched,
+//! `box+mask` replaces text with inverse-colour bands, and `box+outside` adds
+//! a preview bar outside the frame. Click copies a word; drag copies a
+//! selection; Esc dismisses.
 //!
 //! Every pixel is opaque: transparent layered pixels pass mouse input through,
 //! while the mask must own the frame region after OCR.
 
 use crate::capture::copy_text;
-use crate::config::{MaskFill, MaskLayout, MaskSize};
+use crate::config::{MaskFill, MaskMode, MaskSize};
 use crate::logline;
 use crate::ocr::{Snapshot, Word};
 use crate::text::join_words;
@@ -22,33 +24,33 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_ESCAPE,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const BOX_ALPHA: u32 = 0xFF00_0000;
-const TEXT_WHITE: u32 = 0x00FF_FFFF;
 const SELECT_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0)
+const RESULT_GREEN: u32 = 0xFF00_FF00; // RGB(0, 255, 0), opaque
 const DEFAULT_FACE: &str = "Sarasa Term SC Nerd";
 
-/// `[mask]` style resolved when a mask opens: font face, size and layout.
+/// `[mask]` style resolved when a mask opens: font face, size and mode.
 #[derive(Clone)]
 struct Style {
     font: String,
     size: MaskSize,
-    layout: MaskLayout,
+    mode: MaskMode,
 }
 
 static STYLE: Mutex<Style> = Mutex::new(Style {
     font: String::new(),
     size: MaskSize::Auto,
-    layout: MaskLayout::Overlay,
+    mode: MaskMode::Box,
 });
 
 /// Live config (`main` calls this at startup and on every hot-reload).
-pub fn set_style(font: String, size: MaskSize, layout: MaskLayout) {
+pub fn set_style(font: String, size: MaskSize, mode: MaskMode) {
     if let Ok(mut s) = STYLE.lock() {
-        *s = Style { font, size, layout };
+        *s = Style { font, size, mode };
     }
 }
 
@@ -56,7 +58,7 @@ fn style() -> Style {
     STYLE.lock().map(|s| s.clone()).unwrap_or(Style {
         font: DEFAULT_FACE.to_string(),
         size: MaskSize::Pt(10),
-        layout: MaskLayout::Overlay,
+        mode: MaskMode::Box,
     })
 }
 
@@ -78,21 +80,22 @@ struct MaskState {
     /// Left-button drag origin (client coords) while selecting.
     drag: Option<POINT>,
     selected: Vec<usize>,
-    /// Reader-mode text (None = overlay layout).
-    reader: Option<String>,
+    /// Per-word selection outline: orange for source `.box`, inverse text
+    /// colour for `box+mask`.
+    outlines: Vec<u32>,
+    /// The external preview bar (`box+outside`); null otherwise.
+    page: HWND,
 }
 
 /// Style resolved for one draw pass (keeps `draw_base` under the clippy arg
 /// limit).
 struct Base<'a> {
     fixed_em: Option<i32>,
-    layout: MaskLayout,
+    mode: MaskMode,
     face: &'a [u16],
-    reader: Option<&'a str>,
 }
 
 static MASK: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
-static CAPTURE_EXCLUDED: AtomicBool = AtomicBool::new(false);
 
 /// `[mask] fill = "lines"`: continuous band per line segment. Off = boxes.
 static FILL_LINES: AtomicBool = AtomicBool::new(true);
@@ -115,6 +118,11 @@ pub unsafe fn toggle() {
     }
     if IsWindowVisible(hwnd).as_bool() {
         let _ = ShowWindow(hwnd, SW_HIDE);
+        let page = state(hwnd).page;
+        if IsWindow(Some(page)).as_bool() {
+            let _ = ShowWindow(page, SW_HIDE);
+        }
+        crate::frame::set_result(state(hwnd).parent, false);
         logline("mask: hidden");
     } else {
         present(hwnd);
@@ -127,8 +135,16 @@ pub unsafe fn toggle() {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
         );
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
+        let page = state(hwnd).page;
+        if IsWindow(Some(page)).as_bool() {
+            let _ = ShowWindow(page, SW_SHOWNOACTIVATE);
+            let _ = SetForegroundWindow(page);
+            let _ = SetFocus(Some(state_userdata(page).edit));
+        } else {
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+        }
+        crate::frame::set_result(state(hwnd).parent, true);
         logline("mask: shown");
     }
 }
@@ -139,15 +155,14 @@ fn mask_hwnd() -> HWND {
 
 /// Closes the overlay (no-op when none is open) and returns the frame to its
 /// normal interaction state.
-/// True when an old Windows build would capture the visible mask itself.
-pub unsafe fn visible_without_capture_exclusion() -> bool {
-    IsWindow(Some(mask_hwnd())).as_bool() && !CAPTURE_EXCLUDED.load(Ordering::Relaxed)
-}
-
 pub unsafe fn dismiss() {
     let hwnd = mask_hwnd();
     if IsWindow(Some(hwnd)).as_bool() {
+        let parent = state(hwnd).parent;
         let _ = DestroyWindow(hwnd);
+        if IsWindow(Some(parent)).as_bool() {
+            crate::frame::set_result(parent, false);
+        }
     }
 }
 
@@ -220,13 +235,13 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapsho
         MaskSize::Auto => None,
         MaskSize::Pt(pt) => Some(((pt as i32 * dpi as i32 + 36) / 72).max(6)),
     };
-    let reader = if style.layout == MaskLayout::Reader {
-        Some(reader_text(&words))
+    let outside = if style.mode == MaskMode::BoxOutside {
+        Some(panel_text(&words))
     } else {
         None
     };
     let face_w = wide(&style.font);
-    draw_base(
+    let outlines = draw_base(
         memdc,
         bits,
         w,
@@ -234,11 +249,11 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapsho
         &words,
         &Base {
             fixed_em,
-            layout: style.layout,
+            mode: style.mode,
             face: &face_w,
-            reader: reader.as_deref(),
         },
     );
+    paint_result_border(bits, w, h);
 
     let prev_fg = GetForegroundWindow();
     let hwnd = CreateWindowExW(
@@ -270,36 +285,64 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapsho
             old_bitmap,
             drag: None,
             selected: Vec::new(),
-            reader,
+            outlines,
+            page: HWND::default(),
         })) as isize,
     );
     MASK.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
     // Auto-refresh samples the source without hiding this overlay. Windows
     // omits the mask from the capture and exposes the desktop underneath.
     let excluded = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok();
-    CAPTURE_EXCLUDED.store(excluded, Ordering::Relaxed);
     if !excluded {
-        logline("warn: mask cannot be excluded from capture; auto refresh will dismiss it once");
+        logline("warn: mask cannot be excluded from capture on this Windows build");
     }
     present(hwnd);
     let _ = ShowWindow(hwnd, SW_SHOW);
+    let mut page = HWND::default();
+    if let Some(text) = outside.as_deref() {
+        match create_page(parent, rect, text) {
+            Ok(created) => {
+                page = created;
+                state(hwnd).page = created;
+            }
+            Err(e) => logline(&format!("warn: outside editor failed: {e:#}")),
+        }
+    }
+    if IsWindow(Some(page)).as_bool() {
+        // Proofreading mode: the OCR text is preloaded and the editor owns
+        // the keyboard (Esc is handled by its subclass).
+        let _ = SetForegroundWindow(page);
+        let _ = SetFocus(Some(state_userdata(page).edit));
+    } else {
+        let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
+    }
     let _ = SetForegroundWindow(hwnd);
     let _ = SetFocus(Some(hwnd));
+    crate::frame::set_result(parent, true);
     // The first word + rect is the cheapest way to see, from the log alone,
     // what the engine found and where a click test can aim.
     let s = state(hwnd);
-    let mode = match (style.layout, fill_lines()) {
-        (MaskLayout::Reader, _) => "reader",
-        (MaskLayout::Overlay, true) => "overlay:lines",
-        (MaskLayout::Overlay, false) => "overlay:boxes",
+    let mode = match style.mode {
+        MaskMode::Box => "box",
+        MaskMode::BoxMask if fill_lines() => "box+mask:lines",
+        MaskMode::BoxMask => "box+mask:boxes",
+        MaskMode::BoxOutside => "box+outside",
+    };
+    let font_info = match style.mode {
+        MaskMode::Box => "source pixels".to_string(),
+        MaskMode::BoxMask => format!(
+            "{}+{}px",
+            style.font,
+            fixed_em
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "auto".into())
+        ),
+        MaskMode::BoxOutside => format!("{} 12px editor", crate::frame::font_face(parent)),
     };
     logline(&format!(
-        "mask: {mode}, {} words, font {}+{}px over {w}x{h} at ({},{}), first `{}` {:?}",
+        "mask: {mode}, {} words, {font_info} over {w}x{h} at ({},{}), first `{}` {:?}",
         s.words.len(),
-        style.font,
-        fixed_em
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "auto".into()),
         rect.l,
         rect.t,
         s.words[0].text,
@@ -349,6 +392,11 @@ fn line_segments(words: &[Word]) -> Vec<Rect> {
     out
 }
 
+/// Whole result in reading order, used by quick OCR's clipboard copy.
+pub fn all_text(words: &[Word]) -> String {
+    selection_text(words, (0..words.len()).collect())
+}
+
 /// Text for a selection in reading order: `join_words` rules inside a line
 /// (space between Latin words, none inside CJK) and `\n` between lines.
 fn selection_text(words: &[Word], mut picked: Vec<usize>) -> String {
@@ -368,10 +416,10 @@ fn selection_text(words: &[Word], mut picked: Vec<usize>) -> String {
         .join("\n")
 }
 
-/// Paragraphs for reader mode: OCR lines are joined into one flow (spaces via
-/// `join_words`) and separated by a blank line when the vertical gap is at
-/// least one line height.
-fn reader_text(words: &[Word]) -> String {
+/// Preview paragraphs for `box+outside`: OCR lines are joined into one flow
+/// (spaces via `join_words`) and separated by a blank line when the vertical gap
+/// is at least one line height.
+fn panel_text(words: &[Word]) -> String {
     let mut lines: Vec<(i32, i32, Vec<&Word>)> = Vec::new();
     for w in words {
         match lines.last_mut() {
@@ -430,12 +478,6 @@ fn line_em(ems: &[(u32, i32)], line: u32) -> i32 {
         .unwrap_or(13)
 }
 
-fn median_line_em(words: &[Word]) -> i32 {
-    let mut ems: Vec<i32> = line_ems(words).into_iter().map(|(_, em)| em).collect();
-    ems.sort_unstable();
-    ems.get(ems.len() / 2).copied().unwrap_or(13)
-}
-
 unsafe fn font_for(face: &[u16], em: i32, fonts: &mut Vec<(i32, HFONT)>) -> HFONT {
     if let Some((_, font)) = fonts.iter().find(|(size, _)| *size == em) {
         return *font;
@@ -460,97 +502,62 @@ unsafe fn font_for(face: &[u16], em: i32, fonts: &mut Vec<(i32, HFONT)>) -> HFON
     font
 }
 
-/// Draws the mask base once. Overlay: black boxes/bands plus white text at the
-/// OCR positions. Reader: an opaque black page with the reflowed text.
-/// Finally, makes every pixel opaque so the frozen base stays visible.
-unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word], base: &Base) {
-    let _ = SetBkMode(hdc, TRANSPARENT);
-    let _ = SetTextColor(hdc, COLORREF(TEXT_WHITE));
-    let black = CreateSolidBrush(COLORREF(0));
-    let mut fonts: Vec<(i32, HFONT)> = Vec::new();
-
-    if base.layout == MaskLayout::Reader {
-        let page = RECT {
-            left: 0,
-            top: 0,
-            right: w,
-            bottom: h,
-        };
-        let _ = FillRect(hdc, &page, black);
-        for i in 0..(w * h) as usize {
-            *bits.add(i) = BOX_ALPHA;
+/// Draws the mask base once. Plain `box` and `box+outside` leave the source
+/// pixels untouched; `box+mask` replaces each line/word with its inverse-colour
+/// band and text. Every pixel is made opaque so the frozen base stays visible.
+unsafe fn draw_base(
+    hdc: HDC,
+    bits: *mut u32,
+    w: i32,
+    h: i32,
+    words: &[Word],
+    base: &Base,
+) -> Vec<u32> {
+    let len = (w * h) as usize;
+    let mut outlines = vec![SELECT_ORANGE; words.len()];
+    if base.mode != MaskMode::BoxMask {
+        for i in 0..len {
+            *bits.add(i) |= BOX_ALPHA;
         }
-        if let Some(text) = base.reader {
-            let em = base.fixed_em.unwrap_or_else(|| median_line_em(words));
-            let font = font_for(base.face, em, &mut fonts);
-            let old = SelectObject(hdc, font.into());
-            let mut text: Vec<u16> = text.encode_utf16().collect();
-            let mut rc = RECT {
-                left: 10,
-                top: 8,
-                right: (w - 10).max(12),
-                bottom: (h - 8).max(10),
-            };
-            let _ = DrawTextW(
-                hdc,
-                &mut text,
-                &mut rc,
-                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX,
-            );
-            let _ = SelectObject(hdc, old);
-        }
-        let _ = DeleteObject(black.into());
-        for (_, font) in fonts {
-            let _ = DeleteObject(font.into());
-        }
-        // The page is already opaque; glyph pixels arrive with alpha 0.
-        for i in 0..(w * h) as usize {
-            let p = *bits.add(i);
-            if p & 0x00FF_FFFF != 0 {
-                *bits.add(i) = p | BOX_ALPHA;
-            }
-        }
-        return;
+        return outlines;
     }
-
-    // `lines`: one continuous band per line segment, so the gaps between
-    // words stop showing the screen through. The glyphs keep their OCR
-    // positions, so Latin spaces and CJK spacing stay exactly as rendered.
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let mut fonts: Vec<(i32, HFONT)> = Vec::new();
+    let ems = line_ems(words);
+    // Sample every colour before any band is overwritten, or the inverse pass
+    // would read our own painted blocks instead of the source.
+    let word_colors: Vec<(u32, u32)> = words
+        .iter()
+        .map(|word| inverse_colors(bits, w, clip_rect(word.rect, w, h)))
+        .collect();
     if fill_lines() {
         for seg in line_segments(words) {
             let rc = clip_rect(seg, w, h);
             if rc.w() < 2 || rc.h() < 2 {
                 continue;
             }
-            let win = to_win(rc);
-            let _ = FillRect(hdc, &win, black);
-            for y in rc.t..rc.b {
-                for x in rc.l..rc.r {
-                    *bits.add((y * w + x) as usize) |= BOX_ALPHA;
-                }
-            }
+            let (block, _) = inverse_colors(bits, w, rc);
+            let brush = CreateSolidBrush(COLORREF(block));
+            let _ = FillRect(hdc, &to_win(rc), brush);
+            let _ = DeleteObject(brush.into());
         }
     }
-    let ems = line_ems(words);
-    for word in words {
+    for (index, word) in words.iter().enumerate() {
         let rc = clip_rect(word.rect, w, h);
         if rc.w() < 2 || rc.h() < 2 {
             continue;
         }
+        let (block, text_color) = word_colors[index];
+        outlines[index] = text_color;
         if !fill_lines() {
-            let win = to_win(rc);
-            let _ = FillRect(hdc, &win, black);
-            // Opaque box first; the text pass may rewrite alpha on glyph
-            // pixels, the RGB pass below restores those.
-            for y in rc.t..rc.b {
-                for x in rc.l..rc.r {
-                    *bits.add((y * w + x) as usize) |= BOX_ALPHA;
-                }
-            }
+            let brush = CreateSolidBrush(COLORREF(block));
+            let _ = FillRect(hdc, &to_win(rc), brush);
+            let _ = DeleteObject(brush.into());
         }
         let em = base.fixed_em.unwrap_or_else(|| line_em(&ems, word.line));
         let font = font_for(base.face, em, &mut fonts);
         let old = SelectObject(hdc, font.into());
+        let _ = SetTextColor(hdc, COLORREF(text_color));
         let mut text: Vec<u16> = word.text.encode_utf16().collect();
         let mut text_rc = to_win(rc);
         text_rc.left += 1;
@@ -562,12 +569,62 @@ unsafe fn draw_base(hdc: HDC, bits: *mut u32, w: i32, h: i32, words: &[Word], ba
         );
         let _ = SelectObject(hdc, old);
     }
-    let _ = DeleteObject(black.into());
     for (_, font) in fonts {
         let _ = DeleteObject(font.into());
     }
-    for i in 0..(w * h) as usize {
+    for i in 0..len {
         *bits.add(i) |= BOX_ALPHA;
+    }
+    outlines
+}
+
+/// Dominant source colour inside `rc` and its inverse. The dominant colour is
+/// the background, so inverting it and drawing the inverse again as text keeps
+/// dark and light terminals equally readable.
+fn inverse_colors(bits: *mut u32, w: i32, rc: Rect) -> (u32, u32) {
+    let mut counts = [0u32; 16];
+    let mut sums = [[0u64; 3]; 16];
+    for y in rc.t..rc.b {
+        for x in rc.l..rc.r {
+            let p = unsafe { *bits.add((y * w + x) as usize) };
+            let b = (p >> 16) & 0xff;
+            let g = (p >> 8) & 0xff;
+            let r = p & 0xff;
+            let luma = (r * 2 + g * 5 + b) / 8;
+            let bin = (luma / 16) as usize;
+            counts[bin] += 1;
+            sums[bin][0] += r as u64;
+            sums[bin][1] += g as u64;
+            sums[bin][2] += b as u64;
+        }
+    }
+    let bin = counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, count)| **count)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let n = counts[bin].max(1) as u64;
+    let r = (sums[bin][0] / n) as u32 & 0xff;
+    let g = (sums[bin][1] / n) as u32 & 0xff;
+    let b = (sums[bin][2] / n) as u32 & 0xff;
+    let block = (!r & 0xff) | ((!g & 0xff) << 8) | ((!b & 0xff) << 16);
+    let text = (!block) & 0x00ff_ffff;
+    (block, text)
+}
+
+/// The mask covers the frame rect, so its 2 px edge carries the result colour:
+/// the frame reads as continuously green for as long as a result is open.
+fn paint_result_border(bits: *mut u32, w: i32, h: i32) {
+    let t = 2.min(w).min(h);
+    for y in 0..h {
+        for x in 0..w {
+            if x < t || y < t || x >= w - t || y >= h - t {
+                unsafe {
+                    *bits.add((y * w + x) as usize) = RESULT_GREEN;
+                }
+            }
+        }
     }
 }
 
@@ -576,12 +633,14 @@ unsafe fn present(hwnd: HWND) {
     let s = state(hwnd);
     let len = (s.rect.w() * s.rect.h()) as usize;
     std::ptr::copy_nonoverlapping(s.base.as_ptr(), s.bits, len);
-    let brush = CreateSolidBrush(COLORREF(SELECT_ORANGE));
     for &index in &s.selected {
         let rc = to_win(s.words[index].rect);
+        let brush = CreateSolidBrush(COLORREF(
+            s.outlines.get(index).copied().unwrap_or(SELECT_ORANGE),
+        ));
         let _ = FrameRect(s.memdc, &rc, brush);
+        let _ = DeleteObject(brush.into());
     }
-    let _ = DeleteObject(brush.into());
     // GDI writes the reserved byte as 0; a zero alpha hides the outline.
     for i in 0..len {
         let p = *s.bits.add(i);
@@ -619,6 +678,799 @@ unsafe fn present(hwnd: HWND) {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Preferred outside span: below the frame the editor grows with the OCR
+/// text, capped at 2/3 of the work area; beside it a readable fixed width.
+fn page_span(frame: Rect, work: Rect, text: &str) -> i32 {
+    if frame.w() >= frame.h() {
+        let lines = text.lines().count().max(1) as i32;
+        (lines * 18 + 20).clamp(64, (work.h() * 2 / 3).max(64))
+    } else {
+        (frame.w() * 3 / 2)
+            .clamp(220, 480)
+            .min((work.w() * 2 / 3).max(120))
+    }
+}
+
+/// Outside editor placement. Landscape goes BELOW the frame, portrait to its
+/// RIGHT. When that side is short (full-screen OCR), the topmost bar floats
+/// over the frame and is shifted up/left just enough to stay on the monitor.
+fn outside_rect(frame: Rect, work: Rect, span: i32) -> Rect {
+    if frame.w() >= frame.h() {
+        let height = span.clamp(1, work.h().max(1));
+        let below = work.b - frame.b;
+        let top = if below >= height {
+            frame.b
+        } else {
+            (work.b - height).max(work.t)
+        };
+        Rect {
+            l: frame.l,
+            t: top,
+            r: frame.r,
+            b: top + height,
+        }
+    } else {
+        let width = span.clamp(1, work.w().max(1));
+        let right = work.r - frame.r;
+        let left = if right >= width {
+            frame.r
+        } else {
+            (work.r - width).max(work.l)
+        };
+        Rect {
+            l: left,
+            t: frame.t,
+            r: left + width,
+            b: frame.b,
+        }
+    }
+}
+
+struct UndoSnap {
+    text: String,
+    start: i32,
+    end: i32,
+}
+
+struct PageState {
+    edit: HWND,
+    sb: HWND,
+    font: HFONT,
+    brush: HBRUSH,
+    old_edit: isize,
+    undo: Vec<UndoSnap>,
+    redo: Vec<UndoSnap>,
+    last_edit: Option<std::time::Instant>,
+    last_typing: bool,
+    sb_show: bool,
+    sb_drag: Option<i32>,
+}
+
+unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
+    let instance: HINSTANCE = GetModuleHandleW(None)?.into();
+    let class = w!("dt-ocr.maskpage");
+    let wc = WNDCLASSW {
+        style: WNDCLASS_STYLES(0),
+        lpfnWndProc: Some(page_wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: HICON::default(),
+        hCursor: LoadCursorW(None, IDC_IBEAM).unwrap_or_default(),
+        hbrBackground: HBRUSH::default(),
+        lpszMenuName: windows::core::PCWSTR::null(),
+        lpszClassName: windows::core::PCWSTR(class.as_ptr()),
+    };
+    let atom = RegisterClassW(&wc);
+    if atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
+        anyhow::bail!(
+            "RegisterClassW(maskpage) failed: {}",
+            windows::core::Error::from_win32()
+        );
+    }
+    let sb_class = w!("dt-ocr.maskpage.sb");
+    let sb_wc = WNDCLASSW {
+        style: WNDCLASS_STYLES(0),
+        lpfnWndProc: Some(sb_wndproc),
+        cbClsExtra: 0,
+        cbWndExtra: 0,
+        hInstance: instance,
+        hIcon: HICON::default(),
+        hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+        hbrBackground: HBRUSH::default(),
+        lpszMenuName: windows::core::PCWSTR::null(),
+        lpszClassName: windows::core::PCWSTR(sb_class.as_ptr()),
+    };
+    let sb_atom = RegisterClassW(&sb_wc);
+    if sb_atom == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
+        anyhow::bail!(
+            "RegisterClassW(maskpage.sb) failed: {}",
+            windows::core::Error::from_win32()
+        );
+    }
+    let work = crate::frame::bounds(owner);
+    let work = if work.has_area() {
+        work
+    } else {
+        crate::frame::work_area()
+    };
+    let span = page_span(frame, work, text);
+    let r = outside_rect(frame, work, span);
+    if r.w() < 40 || r.h() < 40 {
+        anyhow::bail!("outside editor has no room");
+    }
+    let face = crate::frame::font_face(owner);
+    let wide_face = wide(&face);
+    // Same face/weight as the resize status strip (`frame.font`, 12 px bold).
+    let font = CreateFontW(
+        -12,
+        0,
+        0,
+        0,
+        FW_BOLD.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY,
+        DEFAULT_PITCH.0 as u32,
+        windows::core::PCWSTR(wide_face.as_ptr()),
+    );
+    let brush = CreateSolidBrush(COLORREF(SELECT_ORANGE));
+    let page = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        class,
+        windows::core::PCWSTR::null(),
+        WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+        r.l,
+        r.t,
+        r.w(),
+        r.h(),
+        Some(owner),
+        None,
+        Some(instance),
+        None,
+    )?;
+    SetWindowLongPtrW(
+        page,
+        GWLP_USERDATA,
+        Box::into_raw(Box::new(PageState {
+            edit: HWND::default(),
+            sb: HWND::default(),
+            font,
+            brush,
+            old_edit: 0,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            last_edit: None,
+            last_typing: false,
+            sb_show: false,
+            sb_drag: None,
+        })) as isize,
+    );
+    let edit_style = WINDOW_STYLE(
+        WS_CHILD.0
+            | WS_VISIBLE.0
+            | WS_TABSTOP.0
+            | 0x0004 // ES_MULTILINE
+            | 0x0040 // ES_AUTOVSCROLL
+            | 0x1000 // ES_WANTRETURN
+            | 0x0100, // ES_NOHIDESEL
+    );
+    let edit = match CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        w!("EDIT"),
+        windows::core::PCWSTR::null(),
+        edit_style,
+        6,
+        6,
+        (r.w() - 12).max(1),
+        (r.h() - 12).max(1),
+        Some(page),
+        None,
+        Some(instance),
+        None,
+    ) {
+        Ok(edit) => edit,
+        Err(e) => {
+            let _ = DestroyWindow(page);
+            return Err(e.into());
+        }
+    };
+    state_userdata(page).edit = edit;
+    let sb = match CreateWindowExW(
+        WINDOW_EX_STYLE(0),
+        sb_class,
+        windows::core::PCWSTR::null(),
+        WS_CHILD | WS_VISIBLE,
+        (r.w() - 16).max(1),
+        6,
+        10,
+        (r.h() - 12).max(1),
+        Some(page),
+        None,
+        Some(instance),
+        None,
+    ) {
+        Ok(sb) => sb,
+        Err(e) => {
+            let _ = DestroyWindow(page);
+            return Err(e.into());
+        }
+    };
+    state_userdata(page).sb = sb;
+    SendMessageW(
+        edit,
+        WM_SETFONT,
+        Some(WPARAM(font.0 as usize)),
+        Some(LPARAM(1)),
+    );
+    let mut text: Vec<u16> = text.encode_utf16().collect();
+    let _ = SetWindowTextW(edit, windows::core::PCWSTR(text.as_mut_ptr()));
+    SendMessageW(edit, 0x00B1, Some(WPARAM(0)), Some(LPARAM(0))); // EM_SETSEL
+    let old = SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
+    state_userdata(page).old_edit = old;
+    update_scrollbar(page);
+    let _ = InvalidateRect(Some(page), None, true);
+    logline(&format!(
+        "mask: outside editor {}x{} at ({},{})",
+        r.w(),
+        r.h(),
+        r.l,
+        r.t
+    ));
+    Ok(page)
+}
+
+unsafe fn state_userdata(hwnd: HWND) -> &'static mut PageState {
+    &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PageState)
+}
+
+unsafe fn page_state(hwnd: HWND) -> Option<&'static mut PageState> {
+    let p = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PageState;
+    p.as_mut()
+}
+
+unsafe fn edit_text(edit: HWND) -> String {
+    let len = SendMessageW(edit, 0x000E, None, None).0 as usize; // WM_GETTEXTLENGTH
+    let mut buf = vec![0u16; len + 1];
+    let got = SendMessageW(
+        edit,
+        0x000D, // WM_GETTEXT
+        Some(WPARAM(len + 1)),
+        Some(LPARAM(buf.as_mut_ptr() as isize)),
+    )
+    .0 as usize;
+    String::from_utf16_lossy(&buf[..got.min(len)])
+}
+
+unsafe fn edit_sel(edit: HWND) -> (i32, i32) {
+    let mut start = 0i32;
+    let mut end = 0i32;
+    SendMessageW(
+        edit,
+        0x00B0, // EM_GETSEL
+        Some(WPARAM(&mut start as *mut i32 as usize)),
+        Some(LPARAM(&mut end as *mut i32 as isize)),
+    );
+    (start, end)
+}
+
+unsafe fn set_edit_sel(edit: HWND, start: i32, end: i32) {
+    SendMessageW(
+        edit,
+        0x00B1, // EM_SETSEL
+        Some(WPARAM(start as usize)),
+        Some(LPARAM(end as isize)),
+    );
+}
+
+unsafe fn snapshot(edit: HWND) -> UndoSnap {
+    let (start, end) = edit_sel(edit);
+    UndoSnap {
+        text: edit_text(edit),
+        start,
+        end,
+    }
+}
+
+unsafe fn apply_snapshot(page: HWND, snap: &UndoSnap) {
+    let edit = state_userdata(page).edit;
+    let mut text: Vec<u16> = snap.text.encode_utf16().collect();
+    let _ = SetWindowTextW(edit, windows::core::PCWSTR(text.as_mut_ptr()));
+    set_edit_sel(edit, snap.start, snap.end);
+    SendMessageW(edit, 0x00B7, None, None); // EM_SCROLLCARET
+    update_scrollbar(page);
+}
+
+unsafe fn remember(page: HWND, typing: bool) {
+    let s = state_userdata(page);
+    let now = std::time::Instant::now();
+    let coalesce = typing
+        && s.last_typing
+        && s.last_edit
+            .map(|t| now.duration_since(t) < std::time::Duration::from_millis(700))
+            .unwrap_or(false);
+    if !coalesce {
+        let snap = snapshot(s.edit);
+        if s.undo.len() >= 200 {
+            s.undo.remove(0);
+        }
+        s.undo.push(snap);
+    }
+    s.redo.clear();
+    s.last_edit = Some(now);
+    s.last_typing = typing;
+}
+
+unsafe fn undo(page: HWND) {
+    let s = state_userdata(page);
+    let Some(prev) = s.undo.pop() else {
+        return;
+    };
+    let current = snapshot(s.edit);
+    if s.redo.len() >= 200 {
+        s.redo.remove(0);
+    }
+    s.redo.push(current);
+    s.last_edit = None;
+    s.last_typing = false;
+    apply_snapshot(page, &prev);
+}
+
+unsafe fn redo(page: HWND) {
+    let s = state_userdata(page);
+    let Some(next) = s.redo.pop() else {
+        return;
+    };
+    let current = snapshot(s.edit);
+    if s.undo.len() >= 200 {
+        s.undo.remove(0);
+    }
+    s.undo.push(current);
+    s.last_edit = None;
+    s.last_typing = false;
+    apply_snapshot(page, &next);
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn is_symbol(c: char) -> bool {
+    !c.is_whitespace() && !is_word_char(c)
+}
+
+fn is_newline(c: char) -> bool {
+    c == '\r' || c == '\n'
+}
+
+/// Ctrl+Left/Right stops at token edges: words (letters, digits, `_`, CJK),
+/// runs of other symbols (`=`, `<=`, …) or a line break. It never parks after
+/// the whitespace that follows a word, which is what the stock EDIT does.
+fn next_token(chars: &[char], from: usize) -> usize {
+    let mut i = from;
+    if i >= chars.len() {
+        return chars.len();
+    }
+    if is_newline(chars[i]) {
+        while i < chars.len() && is_newline(chars[i]) {
+            i += 1;
+        }
+        return i;
+    }
+    if chars[i].is_whitespace() {
+        while i < chars.len() && chars[i].is_whitespace() && !is_newline(chars[i]) {
+            i += 1;
+        }
+        if i < chars.len() && is_newline(chars[i]) {
+            while i < chars.len() && is_newline(chars[i]) {
+                i += 1;
+            }
+            return i;
+        }
+    }
+    if i >= chars.len() {
+        return chars.len();
+    }
+    let word = is_word_char(chars[i]);
+    let symbol = is_symbol(chars[i]);
+    while i < chars.len()
+        && !chars[i].is_whitespace()
+        && ((word && is_word_char(chars[i])) || (symbol && is_symbol(chars[i])))
+    {
+        i += 1;
+    }
+    i
+}
+
+fn prev_token(chars: &[char], from: usize) -> usize {
+    let mut i = from.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() && !is_newline(chars[i - 1]) {
+        i -= 1;
+    }
+    if i > 0 && is_newline(chars[i - 1]) {
+        while i > 0 && is_newline(chars[i - 1]) {
+            i -= 1;
+        }
+        return i;
+    }
+    if i == 0 {
+        return 0;
+    }
+    let word = is_word_char(chars[i - 1]);
+    let symbol = is_symbol(chars[i - 1]);
+    while i > 0
+        && !chars[i - 1].is_whitespace()
+        && ((word && is_word_char(chars[i - 1])) || (symbol && is_symbol(chars[i - 1])))
+    {
+        i -= 1;
+    }
+    i
+}
+
+unsafe fn move_word(page: HWND, dir: i32) {
+    let s = state_userdata(page);
+    let text = edit_text(s.edit);
+    let chars: Vec<char> = text.chars().collect();
+    let mut offsets = Vec::with_capacity(chars.len() + 1);
+    let mut off = 0usize;
+    offsets.push(0);
+    for c in &chars {
+        off += c.len_utf16();
+        offsets.push(off);
+    }
+    let (start, end) = edit_sel(s.edit);
+    let caret = if start == end {
+        end.max(0)
+    } else {
+        end.max(start)
+    };
+    let idx = offsets
+        .iter()
+        .position(|&o| o as i32 >= caret)
+        .unwrap_or(chars.len());
+    let next = if dir > 0 {
+        next_token(&chars, idx)
+    } else {
+        prev_token(&chars, idx)
+    };
+    let target = offsets[next] as i32;
+    // Shift+Ctrl+Arrow stays with the stock EDIT so its selection anchor is
+    // preserved; only the plain word jump is customised.
+    set_edit_sel(s.edit, target, target);
+    SendMessageW(s.edit, 0x00B7, None, None); // EM_SCROLLCARET
+    update_scrollbar(page);
+}
+
+unsafe fn select_all(page: HWND) {
+    let edit = state_userdata(page).edit;
+    set_edit_sel(edit, 0, -1);
+}
+
+unsafe fn line_height(edit: HWND) -> i32 {
+    let dc = GetDC(Some(edit));
+    let mut tm = TEXTMETRICW::default();
+    let ok = GetTextMetricsW(dc, &mut tm).as_bool();
+    let _ = ReleaseDC(Some(edit), dc);
+    if ok {
+        (tm.tmHeight + tm.tmExternalLeading).max(1)
+    } else {
+        16
+    }
+}
+
+unsafe fn layout_page(page: HWND) {
+    let Some(s) = page_state(page) else {
+        return;
+    };
+    let mut client = RECT::default();
+    let _ = GetClientRect(page, &mut client);
+    let sb_w = if s.sb_show { 10 } else { 0 };
+    let gap = if s.sb_show { 4 } else { 0 };
+    let edit_w = (client.right - 12 - sb_w - gap).max(1);
+    let edit_h = (client.bottom - 12).max(1);
+    let _ = MoveWindow(s.edit, 6, 6, edit_w, edit_h, true);
+    if IsWindow(Some(s.sb)).as_bool() {
+        if s.sb_show {
+            let _ = MoveWindow(s.sb, client.right - 6 - sb_w, 6, sb_w, edit_h, true);
+            let _ = ShowWindow(s.sb, SW_SHOWNA);
+        } else {
+            let _ = ShowWindow(s.sb, SW_HIDE);
+        }
+    }
+}
+
+unsafe fn update_scrollbar(page: HWND) {
+    let Some(s) = page_state(page) else {
+        return;
+    };
+    if !IsWindow(Some(s.edit)).as_bool() {
+        return;
+    }
+    let mut edit_client = RECT::default();
+    let _ = GetClientRect(s.edit, &mut edit_client);
+    let lh = line_height(s.edit);
+    let visible = (edit_client.bottom / lh).max(1);
+    let lines = SendMessageW(s.edit, 0x00BA, None, None).0 as i32; // EM_GETLINECOUNT
+    let show = lines > visible;
+    if show != s.sb_show {
+        s.sb_show = show;
+        layout_page(page);
+    }
+    if IsWindow(Some(s.sb)).as_bool() {
+        let _ = InvalidateRect(Some(s.sb), None, false);
+    }
+}
+
+/// (lines, visible, first, thumb_y, thumb_h) in the scrollbar's client space.
+unsafe fn scroll_metrics(page: HWND) -> Option<(i32, i32, i32, i32, i32)> {
+    let s = page_state(page)?;
+    let mut edit_client = RECT::default();
+    let _ = GetClientRect(s.edit, &mut edit_client);
+    let mut sb_client = RECT::default();
+    let _ = GetClientRect(s.sb, &mut sb_client);
+    let height = sb_client.bottom.max(1);
+    let lh = line_height(s.edit).max(1);
+    let visible = (edit_client.bottom / lh).max(1);
+    let lines = (SendMessageW(s.edit, 0x00BA, None, None).0 as i32).max(1);
+    let first = SendMessageW(s.edit, 0x00CE, None, None).0 as i32; // EM_GETFIRSTVISIBLELINE
+    let thumb_h = (height * visible / lines).max(18).min(height);
+    let max_first = (lines - visible).max(0);
+    let thumb_y = if max_first > 0 && height > thumb_h {
+        (height - thumb_h) * first.clamp(0, max_first) / max_first
+    } else {
+        0
+    };
+    Some((lines, visible, first, thumb_y, thumb_h))
+}
+
+unsafe fn scroll_page(page: HWND, delta: i32) {
+    let Some(s) = page_state(page) else {
+        return;
+    };
+    SendMessageW(
+        s.edit,
+        0x00B6, // EM_LINESCROLL
+        Some(WPARAM(0)),
+        Some(LPARAM(delta as isize)),
+    );
+    let _ = InvalidateRect(Some(s.sb), None, false);
+}
+
+unsafe fn scroll_drag(page: HWND, y: i32, offset: i32) {
+    let Some((lines, visible, first, _, thumb_h)) = scroll_metrics(page) else {
+        return;
+    };
+    let Some(s) = page_state(page) else {
+        return;
+    };
+    let mut client = RECT::default();
+    let _ = GetClientRect(s.sb, &mut client);
+    let height = client.bottom.max(1);
+    let max_first = (lines - visible).max(0);
+    let denom = (height - thumb_h).max(1);
+    let top = (y - offset).clamp(0, height - thumb_h);
+    let target = (top as i64 * max_first as i64 / denom as i64) as i32;
+    if target != first {
+        SendMessageW(
+            s.edit,
+            0x00B6,
+            Some(WPARAM(0)),
+            Some(LPARAM((target - first) as isize)),
+        );
+    }
+    let _ = InvalidateRect(Some(s.sb), None, false);
+}
+
+unsafe extern "system" fn sb_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let page = GetParent(hwnd).unwrap_or_default();
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let black = CreateSolidBrush(COLORREF(0));
+            let _ = FillRect(hdc, &client, black);
+            let _ = DeleteObject(black.into());
+            if let Some((_, _, _, thumb_y, thumb_h)) = scroll_metrics(page) {
+                let orange = CreateSolidBrush(COLORREF(SELECT_ORANGE));
+                let thumb = RECT {
+                    left: 1,
+                    top: thumb_y,
+                    right: (client.right - 1).max(2),
+                    bottom: (thumb_y + thumb_h).min(client.bottom),
+                };
+                let _ = FillRect(hdc, &thumb, orange);
+                let _ = DeleteObject(orange.into());
+            }
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        WM_LBUTTONDOWN => {
+            let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+            if let Some((_, visible, _, thumb_y, thumb_h)) = scroll_metrics(page) {
+                if y >= thumb_y && y < thumb_y + thumb_h {
+                    if let Some(s) = page_state(page) {
+                        s.sb_drag = Some(y - thumb_y);
+                    }
+                    SetCapture(hwnd);
+                } else {
+                    scroll_page(page, if y < thumb_y { -visible } else { visible });
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            let dragging = page_state(page).and_then(|s| s.sb_drag);
+            if let Some(offset) = dragging {
+                let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
+                scroll_drag(page, y, offset);
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if let Some(s) = page_state(page) {
+                s.sb_drag = None;
+            }
+            let _ = ReleaseCapture();
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe extern "system" fn edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let page = GetParent(hwnd).unwrap_or_default();
+    let old = state_userdata(page).old_edit;
+    if msg == WM_KEYDOWN {
+        let key = VIRTUAL_KEY(wparam.0 as u16);
+        if key == VK_ESCAPE {
+            let _ = PostMessageW(Some(page), WM_CLOSE, WPARAM(0), LPARAM(0));
+            return LRESULT(0);
+        }
+        let ctrl = GetKeyState(0x11) < 0; // VK_CONTROL
+        let shift = GetKeyState(0x10) < 0; // VK_SHIFT
+        let alt = GetKeyState(0x12) < 0; // VK_MENU
+        if ctrl && !alt {
+            match key.0 {
+                0x41 => {
+                    select_all(page);
+                    return LRESULT(0);
+                }
+                0x5A => {
+                    if shift {
+                        redo(page);
+                    } else {
+                        undo(page);
+                    }
+                    return LRESULT(0);
+                }
+                0x59 => {
+                    redo(page);
+                    return LRESULT(0);
+                }
+                0x25 if !shift => {
+                    move_word(page, -1);
+                    return LRESULT(0);
+                }
+                0x27 if !shift => {
+                    move_word(page, 1);
+                    return LRESULT(0);
+                }
+                _ => {}
+            }
+        }
+        if key.0 == 0x08 || key.0 == 0x2E {
+            remember(page, false);
+        }
+    } else if msg == WM_CHAR {
+        let ch = wparam.0 as u32;
+        if ch >= 32 && ch != 127 {
+            remember(page, true);
+        } else if ch == 13 {
+            remember(page, false);
+        }
+    } else if msg == WM_PASTE || msg == WM_CUT || msg == WM_CLEAR {
+        remember(page, false);
+    } else if msg == 0x0286 {
+        // WM_IME_CHAR: committed IME text is an edit too.
+        remember(page, true);
+    }
+    let old: WNDPROC = std::mem::transmute(old);
+    let result = CallWindowProcW(old, hwnd, msg, wparam, lparam);
+    if matches!(
+        msg,
+        WM_KEYDOWN | WM_CHAR | WM_PASTE | WM_CUT | WM_CLEAR | WM_MOUSEWHEEL | 0x0286
+    ) {
+        update_scrollbar(page);
+    }
+    result
+}
+
+unsafe extern "system" fn page_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => {
+            let Some(s) = page_state(hwnd) else {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            };
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let _ = FillRect(hdc, &client, s.brush);
+            LRESULT(1)
+        }
+        WM_CTLCOLOREDIT => {
+            let Some(s) = page_state(hwnd) else {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            };
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            let _ = SetBkColor(hdc, COLORREF(SELECT_ORANGE));
+            let _ = SetTextColor(hdc, COLORREF(0));
+            LRESULT(s.brush.0 as isize)
+        }
+        WM_SIZE => {
+            layout_page(hwnd);
+            update_scrollbar(hwnd);
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            let code = ((wparam.0 >> 16) & 0xffff) as u32;
+            // EN_CHANGE = 0x0300, EN_VSCROLL = 0x0602.
+            if code == 0x0300 || code == 0x0602 {
+                update_scrollbar(hwnd);
+            }
+            LRESULT(0)
+        }
+        WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_ESCAPE => {
+            dismiss();
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            dismiss();
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            dismiss();
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            if let Some(s) = page_state(hwnd) {
+                if IsWindow(Some(s.sb)).as_bool() {
+                    let _ = DestroyWindow(s.sb);
+                }
+                if IsWindow(Some(s.edit)).as_bool() {
+                    let _ = DestroyWindow(s.edit);
+                }
+                let s = Box::from_raw(s as *mut PageState);
+                let _ = DeleteObject(s.font.into());
+                let _ = DeleteObject(s.brush.into());
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 fn to_win(r: Rect) -> RECT {
@@ -712,18 +1564,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_LBUTTONDOWN => {
             let s = state(hwnd);
             let _ = SetCapture(hwnd);
-            if s.reader.is_some() {
-                return LRESULT(0);
-            }
             s.drag = Some(point());
             s.selected.clear();
             present(hwnd);
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            if state(hwnd).reader.is_some() {
-                return LRESULT(0);
-            }
             let Some(start) = state(hwnd).drag else {
                 return LRESULT(0);
             };
@@ -741,17 +1587,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONUP => {
             let _ = ReleaseCapture();
-            if let Some(text) = state(hwnd).reader.clone() {
-                match copy_text(hwnd, &text) {
-                    Ok(()) => logline(&format!(
-                        "mask: copied {} chars (reader): {}",
-                        text.chars().count(),
-                        preview(&text)
-                    )),
-                    Err(e) => logline(&format!("mask: clipboard failed: {e:#}")),
-                }
-                return LRESULT(0);
-            }
             let start = state(hwnd).drag.take();
             if let Some(start) = start {
                 finish_selection(hwnd, start, point());
@@ -766,23 +1601,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_RBUTTONUP => {
             let _ = ReleaseCapture();
-            crate::ocr::auto_disarm();
             dismiss();
             LRESULT(0)
         }
         WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_ESCAPE => {
-            crate::ocr::auto_disarm();
             dismiss();
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_ACTIVATE as isize),
         WM_DESTROY => {
             let s = Box::from_raw(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MaskState);
+            if IsWindow(Some(s.page)).as_bool() {
+                let _ = DestroyWindow(s.page);
+            }
             let _ = SelectObject(s.memdc, s.old_bitmap);
             let _ = DeleteObject(s.bitmap.into());
             let _ = DeleteDC(s.memdc);
             MASK.store(0, std::sync::atomic::Ordering::Relaxed);
-            CAPTURE_EXCLUDED.store(false, Ordering::Relaxed);
             if IsWindow(Some(s.parent)).as_bool() {
                 crate::frame::set_ocr_running(s.parent, false);
             }
@@ -799,6 +1634,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn word_navigation_stops_at_words_symbols_and_line_breaks() {
+        let chars: Vec<char> = "foo = bar\r\nbaz".chars().collect();
+        assert_eq!(next_token(&chars, 0), 3);
+        assert_eq!(next_token(&chars, 3), 5);
+        assert_eq!(next_token(&chars, 5), 9);
+        assert_eq!(next_token(&chars, 9), 11);
+        assert_eq!(next_token(&chars, 11), 14);
+        assert_eq!(prev_token(&chars, 14), 11);
+        assert_eq!(prev_token(&chars, 11), 9);
+        assert_eq!(prev_token(&chars, 9), 6);
+        assert_eq!(prev_token(&chars, 6), 4);
+        assert_eq!(prev_token(&chars, 4), 0);
+    }
+
+    #[test]
+    fn word_navigation_handles_cjk_as_one_token() {
+        let chars: Vec<char> = "你好 world".chars().collect();
+        assert_eq!(next_token(&chars, 0), 2);
+        assert_eq!(next_token(&chars, 2), 8);
+        assert_eq!(prev_token(&chars, 8), 3);
+        assert_eq!(prev_token(&chars, 3), 0);
+    }
 
     fn word(text: &str, l: i32, t: i32, r: i32, b: i32) -> Word {
         Word {
@@ -870,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_joins_lines_and_separates_paragraphs() {
+    fn outside_joins_lines_and_separates_paragraphs() {
         let words = [
             word_on(0, "Hello", 0, 0, 40, 20),
             word_on(0, "world", 50, 0, 90, 20),
@@ -878,7 +1737,126 @@ mod tests {
             word_on(2, "你好", 0, 90, 40, 110),
             word_on(2, "世界", 45, 90, 80, 110),
         ];
-        assert_eq!(reader_text(&words), "Hello world again\n\n你好世界");
+        assert_eq!(panel_text(&words), "Hello world again\n\n你好世界");
+    }
+
+    #[test]
+    fn outside_bar_follows_frame_orientation() {
+        let work = Rect {
+            l: 0,
+            t: 0,
+            r: 1080,
+            b: 1080,
+        };
+        let landscape = Rect {
+            l: 100,
+            t: 300,
+            r: 900,
+            b: 700,
+        };
+        assert_eq!(
+            outside_rect(landscape, work, 160),
+            Rect {
+                l: 100,
+                t: 700,
+                r: 900,
+                b: 860
+            }
+        );
+        let portrait = Rect {
+            l: 600,
+            t: 100,
+            r: 900,
+            b: 700,
+        };
+        assert_eq!(
+            outside_rect(portrait, work, 120),
+            Rect {
+                l: 900,
+                t: 100,
+                r: 1020,
+                b: 700
+            }
+        );
+    }
+
+    #[test]
+    fn outside_bar_floats_up_when_below_is_short() {
+        let work = Rect {
+            l: 0,
+            t: 0,
+            r: 800,
+            b: 620,
+        };
+        let frame = Rect {
+            l: 100,
+            t: 30,
+            r: 700,
+            b: 600,
+        };
+        let bar = outside_rect(frame, work, 100);
+        assert_eq!(bar.b, work.b);
+        assert!(bar.t < frame.b);
+        assert!(bar.t >= work.t);
+    }
+
+    #[test]
+    fn outside_bar_floats_left_when_right_is_short() {
+        let work = Rect {
+            l: 0,
+            t: 0,
+            r: 1080,
+            b: 1080,
+        };
+        let frame = Rect {
+            l: 700,
+            t: 100,
+            r: 1050,
+            b: 900,
+        };
+        let bar = outside_rect(frame, work, 200);
+        assert_eq!(bar.r, work.r);
+        assert!(bar.l < frame.r);
+    }
+
+    #[test]
+    fn outside_editor_span_grows_with_lines_and_caps() {
+        let work = Rect {
+            l: 0,
+            t: 0,
+            r: 1920,
+            b: 1080,
+        };
+        let landscape = Rect {
+            l: 0,
+            t: 0,
+            r: 1920,
+            b: 1080,
+        };
+        assert_eq!(page_span(landscape, work, "one line"), 64);
+        let many = "line\n".repeat(50);
+        assert_eq!(page_span(landscape, work, &many), 720);
+        let portrait = Rect {
+            l: 0,
+            t: 0,
+            r: 300,
+            b: 900,
+        };
+        assert_eq!(page_span(portrait, work, "one line"), 450);
+    }
+
+    #[test]
+    fn inverse_colours_swap_dark_and_light() {
+        let mut dark = vec![0u32; 16];
+        let rc = Rect {
+            l: 0,
+            t: 0,
+            r: 4,
+            b: 4,
+        };
+        assert_eq!(inverse_colors(dark.as_mut_ptr(), 4, rc), (0xffffff, 0));
+        let mut light = vec![0x00ff_ffffu32; 16];
+        assert_eq!(inverse_colors(light.as_mut_ptr(), 4, rc), (0, 0xffffff));
     }
 
     #[test]

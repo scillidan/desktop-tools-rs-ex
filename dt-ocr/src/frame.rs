@@ -30,9 +30,10 @@ const BORDER_SPEC: u32 = 0x0000A5FF; // RGB(255, 165, 0) orange — size mode
 const BAR_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0) — status strip bg / inside text
 const TEXT_BLACK: u32 = 0x00000000;
 const TUNE_RED: u32 = 0x000000FF; // RGB(255, 0, 0) — value clamped at the monitor limit
-const FLASH_CYAN: u32 = 0x00FFFF00; // RGB(0, 255, 255) — capture feedback flash
-                                    // APPWINDOW gives the shell a per-virtual-desktop application view.
-                                    // Without it this popup is considered current on every desktop.
+const FLASH_CYAN: u32 = 0x00FFFF00; // RGB(0, 255, 255) — image capture feedback
+const FLASH_GREEN: u32 = 0x0000FF00; // RGB(0, 255, 0) green — OCR result
+                                     // APPWINDOW gives the shell a per-virtual-desktop application view.
+                                     // Without it this popup is considered current on every desktop.
 const FRAME_EX_STYLE: WINDOW_EX_STYLE =
     WINDOW_EX_STYLE(WS_EX_LAYERED.0 | WS_EX_TOPMOST.0 | WS_EX_NOACTIVATE.0 | WS_EX_APPWINDOW.0);
 const EDGE: i32 = 6; // border hit zone (px) for the spec-mode resize handles
@@ -40,6 +41,19 @@ const EDGE: i32 = 6; // border hit zone (px) for the spec-mode resize handles
 /// above as fallback), and the gap between frame border and strip.
 const STRIP_H: i32 = 24;
 const STRIP_GAP: i32 = 2;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flash {
+    None,
+    Cyan,
+    Green,
+}
+
+/// Result held for one short result-border flash before it is shown.
+enum PendingResult {
+    Mask(Box<crate::ocr::Outcome>),
+    HideFrame,
+}
 
 pub struct FrameState {
     /// Exclude the taskbar from movement and sizing bounds.
@@ -72,8 +86,18 @@ pub struct FrameState {
     /// Set once resize mode has been entered; the first entry of a frame's
     /// lifetime lands on Tune(width), later ones on Drag.
     pub entered_once: bool,
-    /// Capture feedback: border flashes cyan once (cleared by timer 4).
-    pub flash: bool,
+    /// Capture/result feedback: border flashes cyan or green once
+    /// (cleared by timer 4).
+    flash: Flash,
+    /// An OCR result (mask or outside editor) is on screen: keep the border
+    /// green until it is dismissed.
+    result: bool,
+    /// Generation of the OCR run whose result may be shown.
+    ocr_seq: Option<u64>,
+    /// OCR result held until the result flash finishes (timer 6).
+    pending: Option<PendingResult>,
+    /// Why the current OCR run started.
+    ocr_intent: crate::ocr::Intent,
     /// Active client-mouse edge drag; independent of the public mode.
     mouse_drag: Option<MouseDrag>,
 }
@@ -139,6 +163,11 @@ pub(crate) fn rect_of(r: RECT) -> Rect {
         r: r.right,
         b: r.bottom,
     }
+}
+
+/// Configured bounds of the monitor `hwnd` is on (fallback: primary).
+pub(crate) unsafe fn bounds(hwnd: HWND) -> Rect {
+    monitor_bounds(hwnd)
 }
 
 /// Configured bounds of the monitor `hwnd` is on (fallback: primary).
@@ -318,7 +347,11 @@ pub unsafe fn create(
             cursor_on: false,
             tune: None,
             entered_once: false,
-            flash: false,
+            flash: Flash::None,
+            result: false,
+            ocr_seq: None,
+            pending: None,
+            ocr_intent: crate::ocr::Intent::Manual,
             mouse_drag: None,
         })) as isize,
     );
@@ -343,6 +376,13 @@ unsafe fn state_opt(hwnd: HWND) -> Option<&'static mut FrameState> {
         return None;
     }
     Some(&mut *(p as *mut FrameState))
+}
+
+/// Status-strip face, reused by the `box+outside` editor.
+pub unsafe fn font_face(hwnd: HWND) -> String {
+    state_opt(hwnd)
+        .map(|s| s.font_face.clone())
+        .unwrap_or_else(|| "Consolas".to_string())
 }
 
 /// Live-update the status-strip prefs and the OCR scale (config hot-reload).
@@ -420,14 +460,101 @@ pub unsafe fn visible_rect(hwnd: HWND) -> Option<RECT> {
     (r.right > r.left && r.bottom > r.top).then_some(r)
 }
 
-/// Capture feedback: flash the border cyan once (timer 4 clears it).
+/// Image-capture feedback: flash the border cyan once (timer 4 clears it).
 pub unsafe fn flash_capture(hwnd: HWND) {
+    flash(hwnd, Flash::Cyan);
+}
+
+/// OCR result feedback: green until the result is dismissed.
+pub unsafe fn flash_result(hwnd: HWND) {
+    state(hwnd).result = true;
+    flash(hwnd, Flash::Green);
+}
+
+/// Keep the border green while a result window is on screen.
+pub unsafe fn set_result(hwnd: HWND, on: bool) {
+    if let Some(s) = state_opt(hwnd) {
+        s.result = on;
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+/// Record the OCR generation whose result this frame may display.
+pub unsafe fn note_ocr_start(hwnd: HWND, seq: u64) {
+    if let Some(s) = state_opt(hwnd) {
+        s.ocr_seq = Some(seq);
+    }
+}
+
+/// The OCR result that just arrived belongs to the current run.
+pub unsafe fn accept_result(hwnd: HWND, seq: u64) -> bool {
+    let Some(s) = state_opt(hwnd) else {
+        return false;
+    };
+    let ok = s.ocr_seq == Some(seq);
+    if ok {
+        s.ocr_seq = None;
+    }
+    ok
+}
+
+/// Ctrl+Alt+S: pause automatic OCR and discard the in-flight result while the
+/// user adjusts the frame. Ctrl+Shift+Alt+O starts a fresh session.
+pub unsafe fn pause_ocr(hwnd: HWND) {
+    crate::ocr::disable_auto();
+    crate::ocr::finished(hwnd);
+    logline("ocr: paused for frame adjustment");
+    let s = state(hwnd);
+    s.ocr_seq = None;
+    s.ocr_running = false;
+    s.pending = None;
+    s.result = false;
+    s.flash = Flash::None;
+    let _ = KillTimer(Some(hwnd), 4);
+    let _ = KillTimer(Some(hwnd), 5);
+    let _ = KillTimer(Some(hwnd), 6);
+    set_frame_alpha(hwnd, 255);
+    let _ = InvalidateRect(Some(hwnd), None, false);
+}
+
+unsafe fn flash(hwnd: HWND, color: Flash) {
     if !IsWindowVisible(hwnd).as_bool() {
         return;
     }
-    state(hwnd).flash = true;
+    state(hwnd).flash = color;
     let _ = InvalidateRect(Some(hwnd), None, false);
     let _ = SetTimer(Some(hwnd), 4, 180, None);
+}
+
+/// Manual OCR trigger: dim the whole frame to 66% for the same short beat as
+/// the border flash, then restore it (timer 5).
+pub unsafe fn flash_alpha(hwnd: HWND) {
+    if !IsWindowVisible(hwnd).as_bool() {
+        return;
+    }
+    set_frame_alpha(hwnd, 168);
+    let _ = SetTimer(Some(hwnd), 5, 180, None);
+}
+
+unsafe fn set_frame_alpha(hwnd: HWND, alpha: u8) {
+    // LWA_ALPHA applies to the non-colour-key pixels, so the hollow interior
+    // stays click-through while the border dims.
+    let _ = SetLayeredWindowAttributes(hwnd, COLOR_KEY, alpha, LWA_ALPHA | LWA_COLORKEY);
+}
+
+/// Record what the run is for and clear any stale held result. `alpha` is the
+/// manual-trigger dim; automatic refreshes pass false.
+pub unsafe fn prepare_ocr(hwnd: HWND, intent: crate::ocr::Intent, alpha: bool) {
+    let s = state(hwnd);
+    s.ocr_intent = intent;
+    s.pending = None;
+    s.result = false;
+    s.flash = Flash::None;
+    let _ = KillTimer(Some(hwnd), 4);
+    let _ = KillTimer(Some(hwnd), 6);
+    if alpha {
+        flash_alpha(hwnd);
+    }
 }
 
 /// Switch to Move mode from any state (including Pinned), then focus the
@@ -561,9 +688,19 @@ pub unsafe fn hide(hwnd: HWND) {
     if !IsWindow(Some(hwnd)).as_bool() {
         return;
     }
+    crate::ocr::disable_auto();
     if let Some(s) = state_opt(hwnd) {
+        s.pending = None;
+        s.result = false;
+        s.ocr_seq = None;
+        s.ocr_running = false;
+        s.flash = Flash::None;
+        let _ = KillTimer(Some(hwnd), 4);
+        let _ = KillTimer(Some(hwnd), 5);
+        let _ = KillTimer(Some(hwnd), 6);
         let _ = ShowWindow(s.status, SW_HIDE);
     }
+    set_frame_alpha(hwnd, 255);
     let _ = ShowWindow(hwnd, SW_HIDE);
 }
 
@@ -1076,6 +1213,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
         }
         crate::ocr::WM_OCR_START => {
+            prepare_ocr(hwnd, crate::ocr::Intent::Manual, false);
             if let Err(e) = crate::ocr::start(hwnd) {
                 logline(&format!("ocr capture failed: {e:#}"));
             }
@@ -1085,16 +1223,52 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         // frame may have moved since, in which case the mask still matches
         // the pixels that were read).
         crate::ocr::WM_OCR_DONE => {
-            let outcome = *Box::from_raw(lparam.0 as *mut crate::ocr::Outcome);
+            let crate::ocr::Outcome {
+                seq,
+                rect,
+                snapshot,
+                words,
+            } = *Box::from_raw(lparam.0 as *mut crate::ocr::Outcome);
+            if !accept_result(hwnd, seq) {
+                logline("ocr: stale result discarded (paused or superseded)");
+                return LRESULT(0);
+            }
             crate::ocr::finished(hwnd);
             set_ocr_running(hwnd, false);
-            match outcome.words {
+            let intent = state(hwnd).ocr_intent;
+            match words {
                 Ok(words) if !words.is_empty() => {
-                    if let Err(e) = crate::mask::show(hwnd, outcome.rect, words, outcome.snapshot) {
-                        logline(&format!("mask failed: {e:#}"));
+                    if intent == crate::ocr::Intent::Quick {
+                        let text = crate::mask::all_text(&words);
+                        match crate::capture::copy_text(hwnd, &text) {
+                            Ok(()) => logline(&format!(
+                                "ocr: quick copied {} chars",
+                                text.chars().count()
+                            )),
+                            Err(e) => logline(&format!("ocr: quick copy failed: {e:#}")),
+                        }
+                        state(hwnd).pending = Some(PendingResult::HideFrame);
+                    } else {
+                        let outcome = Box::new(crate::ocr::Outcome {
+                            seq,
+                            rect,
+                            snapshot,
+                            words: Ok(words),
+                        });
+                        state(hwnd).pending = Some(PendingResult::Mask(outcome));
+                    }
+                    // The border sits under the mask; hold the result for
+                    // one green beat so the user sees the OCR land.
+                    flash_result(hwnd);
+                    let _ = SetTimer(Some(hwnd), 6, 200, None);
+                }
+                Ok(_) => {
+                    logline("ocr: no words found");
+                    if intent == crate::ocr::Intent::Quick {
+                        state(hwnd).pending = Some(PendingResult::HideFrame);
+                        let _ = SetTimer(Some(hwnd), 6, 60, None);
                     }
                 }
-                Ok(_) => logline("ocr: no words found"),
                 Err(e) => logline(&format!("ocr failed: {e:#}")),
             }
             LRESULT(0)
@@ -1120,11 +1294,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             apply_tune(hwnd);
             LRESULT(0)
         }
-        // Capture feedback: one cyan flash, then back to the normal border.
+        // One border flash, then back to the normal border.
         WM_TIMER if wparam.0 == 4 => {
             let _ = KillTimer(Some(hwnd), 4);
-            state(hwnd).flash = false;
+            state(hwnd).flash = Flash::None;
             let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
+        // Manual OCR trigger dimmed the frame; restore full opacity.
+        WM_TIMER if wparam.0 == 5 => {
+            let _ = KillTimer(Some(hwnd), 5);
+            set_frame_alpha(hwnd, 255);
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            LRESULT(0)
+        }
+        // The result flash had its beat: reveal the mask, or close a quick
+        // OCR frame.
+        WM_TIMER if wparam.0 == 6 => {
+            let _ = KillTimer(Some(hwnd), 6);
+            match state(hwnd).pending.take() {
+                Some(PendingResult::Mask(outcome)) => {
+                    if let Err(e) = crate::mask::show(
+                        hwnd,
+                        outcome.rect,
+                        outcome.words.unwrap_or_default(),
+                        outcome.snapshot,
+                    ) {
+                        logline(&format!("mask failed: {e:#}"));
+                        set_result(hwnd, false);
+                    }
+                }
+                Some(PendingResult::HideFrame) => hide(hwnd),
+                None => {}
+            }
             LRESULT(0)
         }
         WM_WINDOWPOSCHANGED => {
@@ -1336,6 +1538,19 @@ unsafe fn tune_limit(hwnd: HWND, field: TuneField) -> i32 {
     (2 * d1.min(d2)).max(16)
 }
 
+fn border_color(flash: Flash, result: bool, mode: Mode) -> u32 {
+    match flash {
+        Flash::Cyan => FLASH_CYAN,
+        Flash::Green => FLASH_GREEN,
+        Flash::None if result => FLASH_GREEN,
+        Flash::None => match mode {
+            Mode::Move => BORDER_DRAG,
+            Mode::Pinned => BORDER_PINNED,
+            Mode::Input | Mode::Drag | Mode::Tune => BORDER_SPEC,
+        },
+    }
+}
+
 unsafe fn paint(hwnd: HWND) {
     let s = state(hwnd);
     let mut ps = PAINTSTRUCT::default();
@@ -1345,15 +1560,7 @@ unsafe fn paint(hwnd: HWND) {
     let key_brush = CreateSolidBrush(COLOR_KEY);
     let _ = FillRect(hdc, &client, key_brush);
     let frame_client = client; // pre-inset rect for the command bar
-    let border = if s.flash {
-        FLASH_CYAN
-    } else {
-        match s.mode {
-            Mode::Move => BORDER_DRAG,
-            Mode::Pinned => BORDER_PINNED,
-            Mode::Input | Mode::Drag | Mode::Tune => BORDER_SPEC,
-        }
-    };
+    let border = border_color(s.flash, s.result, s.mode);
     let outer_brush = CreateSolidBrush(COLORREF(border));
     let inner_brush = CreateSolidBrush(COLORREF(border));
     // 2 px border (FrameRect is always one logical unit = one physical px).
@@ -1870,6 +2077,15 @@ unsafe fn paint_status(hwnd: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn result_border_stays_green_until_dismissed() {
+        assert_eq!(border_color(Flash::None, true, Mode::Move), FLASH_GREEN);
+        assert_eq!(border_color(Flash::None, true, Mode::Pinned), FLASH_GREEN);
+        assert_eq!(border_color(Flash::None, true, Mode::Tune), FLASH_GREEN);
+        assert_eq!(border_color(Flash::None, false, Mode::Move), BORDER_DRAG);
+        assert_eq!(border_color(Flash::Cyan, true, Mode::Move), FLASH_CYAN);
+    }
 
     #[test]
     fn frame_stays_on_its_virtual_desktop() {

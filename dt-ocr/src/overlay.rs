@@ -23,9 +23,41 @@ const BAND: u32 = 0x003C3CE6; // RGB(230, 60, 60) red — drawing in progress
 struct DragState {
     start: Option<POINT>,
     cur: POINT,
+    intent: Intent,
+}
+
+/// What to do with the completed selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Intent {
+    Frame,
+    QuickOcr,
+    AutoOcr,
 }
 
 static OVERLAY: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+static THIN_CURSOR: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// One-pixel inversion crosshair: `XOR` turns the single centre row/column
+/// into the inverse of whatever is under it, so it stays visible on dark and
+/// light content and is as thin as a cursor can be.
+fn thin_cursor() -> HCURSOR {
+    let stored = THIN_CURSOR.load(std::sync::atomic::Ordering::Relaxed);
+    if stored != 0 {
+        return HCURSOR(stored as *mut core::ffi::c_void);
+    }
+    let and = [0xffu8; 32 * 32 / 8];
+    let mut xor = [0u8; 32 * 32 / 8];
+    for i in 0..32 {
+        xor[16 * 4 + i / 8] |= 1 << (7 - i % 8);
+        xor[i * 4 + 16 / 8] |= 0x80;
+    }
+    let cursor = unsafe {
+        CreateCursor(None, 16, 16, 32, 32, and.as_ptr() as _, xor.as_ptr() as _)
+            .unwrap_or_else(|_| LoadCursorW(None, IDC_CROSS).unwrap_or_default())
+    };
+    THIN_CURSOR.store(cursor.0 as isize, std::sync::atomic::Ordering::Relaxed);
+    cursor
+}
 
 fn overlay_hwnd() -> HWND {
     HWND(OVERLAY.load(std::sync::atomic::Ordering::Relaxed) as *mut core::ffi::c_void)
@@ -45,7 +77,7 @@ fn virtual_screen() -> RECT {
 
 /// Creates (or recreates) the overlay and takes over the mouse until the
 /// drag finishes; the selected rect goes to the frame window.
-pub unsafe fn begin() -> Result<()> {
+pub unsafe fn begin(intent: Intent) -> Result<()> {
     if IsWindow(Some(overlay_hwnd())).as_bool() {
         let _ = DestroyWindow(overlay_hwnd());
     }
@@ -58,7 +90,7 @@ pub unsafe fn begin() -> Result<()> {
         cbWndExtra: 0,
         hInstance: instance,
         hIcon: HICON::default(),
-        hCursor: LoadCursorW(None, IDC_CROSS).unwrap_or_default(),
+        hCursor: thin_cursor(),
         hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as _),
         lpszMenuName: windows::core::PCWSTR::null(),
         lpszClassName: windows::core::PCWSTR(class.as_ptr()),
@@ -92,11 +124,15 @@ pub unsafe fn begin() -> Result<()> {
         Box::into_raw(Box::new(DragState {
             start: None,
             cur: POINT::default(),
+            intent,
         })) as isize,
     );
     OVERLAY.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
     let _ = SetForegroundWindow(hwnd);
     let _ = SetCapture(hwnd);
+    // WM_SETCURSOR is not delivered just because the overlay appeared, so a
+    // resize cursor left by the frame would otherwise stay until the first move.
+    SetCursor(Some(thin_cursor()));
     logline("draw: drag a rect (Esc cancels)");
     Ok(())
 }
@@ -132,6 +168,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            SetCursor(Some(thin_cursor()));
             let s = drag(hwnd);
             if s.start.is_some() {
                 let old = band(s);
@@ -185,6 +222,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_DESTROY => {
+            SetCursor(Some(LoadCursorW(None, IDC_ARROW).unwrap_or_default()));
             drop(Box::from_raw(
                 GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DragState
             ));
@@ -198,6 +236,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 /// Converts the client-coords band to a screen rect (before destroying the
 /// window — its origin goes with it), places the frame, then cleans up.
 unsafe fn finish(hwnd: HWND, band_rect: Option<RECT>) {
+    let intent = drag(hwnd).intent;
     let origin = rect_of({
         let mut wr = RECT::default();
         let _ = GetWindowRect(hwnd, &mut wr);
@@ -218,5 +257,21 @@ unsafe fn finish(hwnd: HWND, band_rect: Option<RECT>) {
         return;
     }
     logline(&format!("draw: selected {rect:?}"));
-    crate::frame::place(crate::frame_hwnd(), rect);
+    let frame = crate::frame_hwnd();
+    crate::frame::place(frame, rect);
+    let ocr_intent = match intent {
+        Intent::Frame => return,
+        Intent::QuickOcr => crate::ocr::Intent::Quick,
+        Intent::AutoOcr => crate::ocr::Intent::Auto,
+    };
+    crate::frame::prepare_ocr(frame, ocr_intent, true);
+    if ocr_intent == crate::ocr::Intent::Auto {
+        crate::ocr::enable_auto(frame);
+    }
+    if let Err(e) = crate::ocr::start(frame) {
+        logline(&format!("ocr start failed: {e:#}"));
+        if ocr_intent == crate::ocr::Intent::Auto {
+            crate::ocr::disable_auto();
+        }
+    }
 }

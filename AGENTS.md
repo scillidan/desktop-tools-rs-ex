@@ -60,8 +60,8 @@ window scaling. Same user, same machine, same conventions.
   user may be working — tell them first and run the batch once at the end, or
   the focus stealing looks like the app is spawning windows.
 - `RegisterHotKey` ids are 1-based indexes into `Action::ALL` (1 draw,
-  2 resize, 3 pin, 4 capture, 5 frame_window, 6 pin_shot, 7 move, 8 toggle);
-  `PostMessage WM_HOTKEY`
+  2 resize, 3 pin, 4 capture, 5 frame_window, 6 pin_shot, 7 move, 8 toggle,
+  9 quick_ocr, 10 auto_ocr); `PostMessage WM_HOTKEY`
   drives message-level behavior in harnesses.
 - `InvalidateRect` alone does not repaint under hit-test traffic; the drag
   path calls `UpdateWindow` directly. `SystemParametersInfoForDpi` fails with
@@ -92,14 +92,36 @@ SizeSpec input/tune, status strip; `interaction.rs` pure five-state machine;
 RegisterHotKey; `ocr.rs` engine routing + Windows OCR fallback; `ocr/auto.rs`
 250 ms source sampling + debounce; `ocr/external.rs`
 persistent RapidOCR worker + Tesseract TSV; `scripts/rapidocr_worker.py` embedded
-uv/ONNX worker; `mask.rs` layered mask, overlay/reader rendering, selection, toggle; `text.rs`
+uv/ONNX worker; `mask.rs` layered mask, box/box+mask/box+outside rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
 Shell_NotifyIconW; `menu.rs` native tray popup; `icon.rs`/`build.rs`
 procedural icon.
 
 ## Capture sinks
 
-`capture` (ctrl+enter) grabs the frame region for OCR and the clipboard.
+`capture` (ctrl+enter) grabs the frame region for OCR and the clipboard. Manual
+OCR dims the frame to 66% for ~180 ms at the trigger; a successful result turns
+the border green (RGB 0,255,0) and it STAYS green while the mask or outside
+editor is open. The mask covers the frame rect, so it paints the same
+2 px green edge itself; the border returns to the mode colour when the result is
+dismissed or hidden.
+
+`quick_ocr` (ctrl+alt+o) draws a region, OCRs it, copies the whole text to the
+clipboard, flashes green and closes the frame. No mask is shown, so this
+one is a brief green beat before it disappears.
+
+`auto_ocr` (ctrl+shift+alt+o) is the only way to enter automatic OCR. With no
+frame it draws one; with a frame visible (any mode) it OCRs that frame
+immediately. Each background change dismisses the stale mask after the
+configured `[ocr] auto_delay_ms` debounce and re-OCRs. Pressing `ctrl+alt+s`
+pauses the session, discards any in-flight result and returns the frame to
+normal resize mode; `ctrl+shift+alt+o` starts a fresh session. The same hotkey
+turns it off and closes the frame; hiding the frame any other way also stops it.
+Drawing (`ctrl+alt+d`), `ctrl+alt+w` and moving/resizing never arm it.
+
+Only `draw`, `frame_window`, `quick_ocr`, `auto_ocr` and the no-frame
+`pin_shot` may run without a visible frame; resize/pin/capture/move/toggle log
+an ignore instead of resurrecting a hidden frame.
 
 `frame_window` (ctrl+alt+w) puts the frame on the window the user is looking at
 (focused window → topmost real window under the cursor → the monitor) and goes
@@ -136,8 +158,11 @@ shrinking, and a layered window was not invalidated during enlargement, leaving
 ghosts. Esc/right-click closes; creation fits the image into the work area.
 Existing pins keep the style they were created with. No per-desktop pinning yet.
 
-`flash_capture` flashes the capture border cyan (RGB(0,255,255), timer 4,
-180 ms). Esc on a focused Move frame puts it away; both `place()` callers
+`flash_capture` flashes the image-capture border cyan (RGB(0,255,255)); OCR
+results use green (RGB(0,255,0)) on timer 4 for 180 ms, then a
+200 ms timer reveals the mask/editor or closes a quick-OCR frame. A manual OCR
+trigger also sets frame opacity to 168/255 (66%) and restores it on timer 5.
+Esc on a focused Move frame puts it away; both `place()` callers
 (a completed draw and ctrl+alt+w) focus the frame, so their Esc and Ctrl+S /
 Ctrl+Shift+S / Ctrl+C / Ctrl+P behavior is identical. The daemon stays resident and any command brings it
 back.
@@ -174,7 +199,7 @@ an explorer restart silently removes the icon for the rest of the session.
   `tesseract-languages`). Auto's secondary pass needs only `eng`; a missing
   executable or language leaves the RapidOCR result intact.
 - Fonts: `Sarasa Term SC Nerd` (mask default, the WezTerm face) and
-  `Microsoft YaHei` (reader/fallback).
+  `Microsoft YaHei` (outside-panel fallback).
 
 ## Resident host
 
@@ -250,8 +275,10 @@ P0.3 status: overlay mask complete. Capture keeps the image capture and starts
 Windows.Media.Ocr on a worker thread (`ocr.rs`: top-down BGRA capture →
 SoftwareBitmap → word boxes; zh-Hans-CN engine first, then en), the frame is
 click-through while it runs, and `mask.rs` shows a topmost per-pixel-alpha
-layered window over the frame: a frozen native-resolution BGRA snapshot as
-the base, a black backing box per word with the text re-rendered white. Every
+layered window over the frame: a frozen native-resolution BGRA snapshot as the
+base, then one of three presentations (`[mask] mode`): `box` leaves the source
+text untouched, `box+mask` draws inverse-colour bands and text, `box+outside`
+adds a preview bar outside the frame. Every
 pixel is opaque, so the mask stays hit-testable and source scrolling cannot
 misalign it. Click = that word on the
 clipboard; press-drag rectangle = `text::join_words` paragraph (space between
@@ -269,17 +296,36 @@ mangles long Latin). Rectangles are divided back by the scale. Measured on
 exact at native res but ~1.6 s per CLI run and line-level only — that is the
 P0.4 engine decision.
 
-P0.3 mask fill: `[mask] fill = "lines"` (default) paints one continuous black
-band per OCR line segment (word gaps < 3/4 em filled, tabs/columns separate);
-the glyphs keep their OCR positions, so Latin/CJK spacing is exact and word
-hit-testing stays aligned. `"boxes"` restores the per-word look. Selections
-copy with `\n` between OCR lines. The new `toggle` binding (default
-`win+shift+o`; Win+O is reserved by Windows) hides/shows the existing mask
-with the same HWND, no re-OCR. `[mask]` also carries `font` (default Sarasa
-Term SC Nerd, the WezTerm face), `size` in points (default 10 = WezTerm's
-`font_size`; "auto" = per-line source height) and `layout = "overlay" |
-"reader"`. Reader paints an opaque page and reflows the text at the fixed
-size, paragraphs separated by a blank line; a click copies the whole text.
+P0.3 mask presentation: `[mask] mode = "box" | "box+mask" | "box+outside"`
+(default `box`). `box` shows untouched source pixels with an orange outline on
+click/selection. `box+mask` re-renders words in the configured font on
+inverse-colour bands (the dominant source colour is inverted for the band and
+inverted again for text, so dark and light terminals both stay readable); its
+selection outline uses the text colour. `box+outside` leaves the source pixels
+untouched and opens a multi-line native `EDIT` bar, orange with black text,
+using `frame.font` at the status strip's 12 px bold — the resize input box made
+multi-line. The OCR text is preloaded; every normal editing key works. Plain
+Ctrl+Left/Right jumps to token edges (word, symbol run such as `=`, or line
+break) and stops at the word end, never after trailing whitespace; Shift+Ctrl
+stays with the stock control so the selection anchor survives. The page keeps
+its own undo/redo history (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z; consecutive typing
+within 700 ms is one step), implements Ctrl+A, and leaves Ctrl+C/X/V,
+Ctrl+Backspace/Delete, Home/End and Shift selection to the EDIT control. A
+vertical scrollbar is a custom child window: black track with an orange thumb,
+dragging or clicking the track scrolls via EM_LINESCROLL. Esc closes the result.
+Landscape puts the page BELOW the frame, portrait to the RIGHT; when that side
+is short (e.g. full-screen OCR) the topmost bar floats over the frame and shifts
+up/left just enough to stay on the monitor. In `box+mask`, `[mask] fill = "lines"`
+(default) paints one continuous band per OCR line segment (word gaps < 3/4 em
+filled, tabs/columns separate); `"boxes"` restores the per-word look. In all
+modes the glyphs keep their OCR positions, so Latin/CJK spacing is exact and
+word hit-testing stays aligned. Selections copy with `\n` between OCR lines. The
+`toggle` binding (default `win+shift+o`; Win+O is reserved by Windows) hides/
+shows the existing mask and outside bar with the same HWNDs, no re-OCR.
+`[mask] font` (default Sarasa Term SC Nerd, the WezTerm face) and `size` in
+points (default 10 = WezTerm's `font_size`; "auto" = per-line source height)
+apply to `box+mask`; the outside editor always follows `frame.font`. The old
+`reader` mode is gone.
 
 P0.4 status: `[ocr] engine = "auto" | "rapid" | "tesseract"` selects the
 provider, hot-reloaded with the rest of the config. Auto runs RapidOCR first,
@@ -299,24 +345,27 @@ RapidOCR takes ~6.6 s including its first model start and ~0.8–1.1 s afterward
 Tesseract takes ~0.6–1.0 s. `mask_test.ps1` passes all 25 checks including exact
 mixed Latin+CJK selection, and `engine_routing_test.ps1` passes 8 checks.
 
-P0.5 status: `[ocr] auto = false | { every_ms, on_change }` is hot-reloaded and
-disabled by default. Auto-refresh arms only after a manual OCR, never at daemon
-startup or on a fixed-width preview. The existing 250 ms host timer also drives
-sampling (config is polled every fourth tick). On-change compares a 48×27 luma
-fingerprint of the source window, ignores blank `PrintWindow` results, requires
-≥0.5% changed samples twice consecutively, and waits at least 500 ms between
-OCR runs. The first changed sample immediately dismisses the now-stale mask;
-the second confirms the change and starts OCR. Esc or right-click on a mask
-also disarms auto refresh until the next manual OCR, while internal dismissal
-leaves it armed. Sampling uses ordinary `PrintWindow` on the topmost real source
-window
-when the frame is contained in it; `PW_RENDERFULLCONTENT` returned blank frames
-on this machine. Static content leaves the existing mask untouched. A due
-refresh dismisses the old mask before the full-screen capture, reuses
-`ocr::start`, and never writes the clipboard. `every_ms` works independently of
-`on_change`. `auto_refresh_test.ps1` passes 7 checks; its OCR-only start uses
-internal `WM_OCR_START` so the machine's wedging image-clipboard path is not
-part of the test.
+P0.5 status: automatic OCR is OFF by default. `auto_ocr` (`ctrl+shift+alt+o`) is
+the only way to arm it: with no frame it draws one, with a visible frame (any
+mode) it OCRs immediately and starts a fresh generation. Pressing `ctrl+alt+s`
+pauses the session, drops any in-flight result (`ocr::start` seq/`accept_result`),
+dismisses the old mask and returns the frame to resize; `ctrl+shift+alt+o`
+resumes. The same hotkey again stops automatic OCR and closes the frame; any
+other hide also disarms it. Drawing, `frame_window`, moving and resizing never
+arm it. `[ocr] auto_delay_ms` (default 1000, range 100–60000) is the debounce.
+The 250 ms host timer samples the frame only while armed (config is polled every
+fourth tick). The first sample establishes a 48×27 luma fingerprint baseline;
+blank renders are ignored. The first material change (≥0.5% of samples beyond
+the per-pixel delta) immediately dismisses the stale mask, then the delay later
+starts OCR if the source is still changed. Esc on a result hides it but leaves
+the armed session alone; the next change OCRs again. Sampling tries ordinary
+`PrintWindow`, then `PW_RENDERFULLCONTENT` and finally the window DC, keeping the
+first render with real contrast (plain `PrintWindow` returned a blank surface on
+real apps here); `ocr_actions_test.ps1` covers the no-frame guard, outside
+editor, arming/refreshing/pausing/switching off and quick OCR (22 checks), and
+`editor_test.ps1` covers the persistent green result border, editor scrollbar
+colors/scrolling and pause/resume (16 checks); `edit_keys_test.ps1` covers
+Ctrl+Z/Y, Ctrl+A and token-wise Ctrl+Left/Right (13 checks).
 
 ## Design decisions (the part worth copying into other tools)
 
@@ -337,10 +386,14 @@ part of the test.
 | P0.3 | `toggle` = `win+shift+o`, reuses the mask HWND | Win+O is reserved (RegisterHotKey 1409); toggling must not re-run OCR |
 | P0.3 | Selection text = `join_words` per line + `\n` between lines | keeps line breaks, spaces between Latin words, none inside CJK |
 | P0.3 | Mask text fixed size by default (`size`, points; `auto` = per-line median) | per-word sizing made words jump; 10 pt matches the user's WezTerm font |
-| P0.3 | `layout = "reader"`: opaque page, reflowed text, click copies all | a readable mode separate from the position-faithful overlay |
+| P0.3 | `mode = "box" | "box+mask" | "box+outside"` | source-faithful default, an inverse-colour visual mode, and an editable multi-line proofreading bar outside the frame |
 | P0.4 | Persistent RapidOCR worker, native character boxes | avoids the ~1.6 s model reload per CLI call and gives the mask exact word hit-testing without guessing glyph widths |
 | P0.4 | `auto` = RapidOCR + Tesseract Latin-line replacement, Windows OCR fallback | best mixed-script result; an unavailable external dependency never removes OCR entirely |
 | P0.4 | External processes use `CREATE_NO_WINDOW`; worker stdin/stdout are UTF-8 | OCR never flashes a console, and CJK output is not corrupted by the Windows ANSI code page |
+| P0.5 | Auto OCR is armed only by `ctrl+shift+alt+o`; `ctrl+alt+s` pauses and drops in-flight results | implicit always-on OCR popped masks while the user was only moving frames; resizing needs the result gone immediately |
+| P0.5 | Auto sampling falls back PrintWindow → PW_RENDERFULLCONTENT → window DC | plain PrintWindow returns an all-black surface on some real apps, which silently disabled change detection |
+| P0.7 | Result state keeps the frame/result edge green until dismissal | the mask covers the frame border, so a one-shot flash was invisible; the mask paints the same edge itself |
+| P0.7 | Outside editor is a stock multi-line EDIT plus a custom scrollbar | native editing/IME/selection stay intact; only undo history, token jumps, Ctrl+A and the black/orange scrollbar are ours |
 | P0.6 | Releases and Scoop manifests use the `-ex` naming; the hash stays empty until the first release | assets and manifest autoupdate must agree; never call an unreleased package installable |
 
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

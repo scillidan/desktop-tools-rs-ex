@@ -9,6 +9,7 @@
 use crate::logline;
 use anyhow::{anyhow, ensure, Context, Result};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::HSTRING;
 use windows::Foundation::{AsyncStatus, IAsyncAction, IAsyncOperation};
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapEncoder, BitmapPixelFormat};
@@ -40,6 +41,9 @@ const SHELL_DESKTOP_CLASSES: [&str; 4] = [
     "Shell_TrayWnd",
     "Shell_SecondaryTrayWnd",
 ];
+
+static FLAGS2_LOGGED: AtomicBool = AtomicBool::new(false);
+static WINDOWDC_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// One grabbed rectangle: a top-down 32 bpp DIB section (pixel access) plus a
 /// device-dependent copy for CF_BITMAP, because a DIB *section* handle reads as
@@ -412,11 +416,58 @@ pub unsafe fn print_source(rect: RECT) -> Result<(i32, i32, Vec<u8>)> {
     let bmp = CreateDIBSection(Some(screen), &info, DIB_RGB_COLORS, &mut bits, None, 0)
         .context("CreateDIBSection failed")?;
     let old = SelectObject(mem, bmp.into());
-    let printed = PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(0)).as_bool();
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    let mut out = Vec::new();
+    if PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(0)).as_bool() && !bits.is_null() {
+        out = crop_source(bits, sw, source, rect);
+    }
+    // Some composited apps return an all-black surface for plain PrintWindow
+    // (observed on this machine); PW_RENDERFULLCONTENT asks DWM for the real
+    // image. Keep whichever pass has actual content.
+    if out.is_empty() || flat(&out) {
+        if !bits.is_null() {
+            ptr::write_bytes(bits as *mut u8, 0, (sw * sh * 4) as usize);
+        }
+        if PrintWindow(hwnd, mem, PRINT_WINDOW_FLAGS(2)).as_bool() && !bits.is_null() {
+            let alt = crop_source(bits, sw, source, rect);
+            if !flat(&alt) || out.is_empty() {
+                if !flat(&alt) && !FLAGS2_LOGGED.swap(true, Ordering::Relaxed) {
+                    logline("auto sample: PrintWindow needed PW_RENDERFULLCONTENT");
+                }
+                out = alt;
+            }
+        }
+    }
+    // Last resort: the window's own DC still holds the surface for several
+    // classic apps even when PrintWindow refuses to paint.
+    if out.is_empty() || flat(&out) {
+        let src = GetWindowDC(Some(hwnd));
+        if !src.0.is_null() {
+            if BitBlt(mem, 0, 0, sw, sh, Some(src), 0, 0, SRCCOPY).is_ok() && !bits.is_null() {
+                let alt = crop_source(bits, sw, source, rect);
+                if !flat(&alt) || out.is_empty() {
+                    if !flat(&alt) && !WINDOWDC_LOGGED.swap(true, Ordering::Relaxed) {
+                        logline("auto sample: PrintWindow needed the window DC");
+                    }
+                    out = alt;
+                }
+            }
+            let _ = ReleaseDC(Some(hwnd), src);
+        }
+    }
     let _ = SelectObject(mem, old);
     let _ = DeleteDC(mem);
     let _ = ReleaseDC(None, screen);
-    ensure!(printed && !bits.is_null(), "PrintWindow failed");
+    ensure!(!out.is_empty(), "PrintWindow failed");
+    let _ = DeleteObject(bmp.into());
+    for i in 0..out.len() / 4 {
+        out[i * 4 + 3] = 0xff;
+    }
+    Ok((w, h, out))
+}
+
+/// Crop the source-window DIB down to the frame rect.
+unsafe fn crop_source(bits: *mut core::ffi::c_void, sw: i32, source: RECT, rect: RECT) -> Vec<u8> {
     let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
     let mut out = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
@@ -427,11 +478,27 @@ pub unsafe fn print_source(rect: RECT) -> Result<(i32, i32, Vec<u8>)> {
             (w * 4) as usize,
         ));
     }
-    let _ = DeleteObject(bmp.into());
-    for i in 0..out.len() / 4 {
-        out[i * 4 + 3] = 0xff;
+    out
+}
+
+/// All sampled pixels nearly identical: a failed/blank render.
+fn flat(bgra: &[u8]) -> bool {
+    let mut min = u8::MAX;
+    let mut max = u8::MIN;
+    let pixels = bgra.len() / 4;
+    if pixels == 0 {
+        return true;
     }
-    Ok((w, h, out))
+    let step = (pixels / 4096).max(1);
+    for i in (0..pixels).step_by(step) {
+        let b = bgra[i * 4];
+        let g = bgra[i * 4 + 1];
+        let r = bgra[i * 4 + 2];
+        let v = ((b as u32 + g as u32 * 2 + r as u32) / 4) as u8;
+        min = min.min(v);
+        max = max.max(v);
+    }
+    max.saturating_sub(min) <= 2
 }
 
 /// BitBlt the screen rect into a top-down 32 bpp DIB with opaque alpha.
@@ -699,6 +766,19 @@ pub unsafe fn copy_text(hwnd: HWND, text: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flat_render_detection_separates_blank_from_content() {
+        assert!(flat(&[0u8; 16 * 4]));
+        assert!(flat(&[255u8; 16 * 4]));
+        let mut mixed = vec![0u8; 16 * 4];
+        for i in 0..16 {
+            mixed[i * 4] = if i % 2 == 0 { 0 } else { 220 };
+            mixed[i * 4 + 1] = if i % 2 == 0 { 0 } else { 220 };
+            mixed[i * 4 + 2] = if i % 2 == 0 { 0 } else { 220 };
+        }
+        assert!(!flat(&mixed));
+    }
 
     #[test]
     fn env_vars_expand_and_unknown_names_stay_literal() {
