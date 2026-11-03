@@ -9,6 +9,22 @@ use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 use crate::config::Config;
 use crate::frame;
 
+/// True when `hwnd` belongs to the desktop the user is looking at. Fail-open:
+/// an unavailable shell service must never make the frame unusable.
+pub fn is_on_current(hwnd: HWND) -> bool {
+    unsafe {
+        let Ok(manager) =
+            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_ALL)
+        else {
+            return true;
+        };
+        manager
+            .IsWindowOnCurrentVirtualDesktop(hwnd)
+            .map(|on| on.as_bool())
+            .unwrap_or(true)
+    }
+}
+
 pub struct Frames {
     manager: IVirtualDesktopManager,
     items: Vec<HWND>,

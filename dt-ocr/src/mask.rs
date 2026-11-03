@@ -24,13 +24,13 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_ESCAPE,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const BOX_ALPHA: u32 = 0xFF00_0000;
 const SELECT_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0)
-const RESULT_GREEN: u32 = 0xFF00_FF00; // RGB(0, 255, 0), opaque
+const RESULT_GREEN: u32 = 0xFF32_CD32; // LimeGreen #32CD32, opaque
 const DEFAULT_FACE: &str = "Sarasa Term SC Nerd";
 
 /// `[mask]` style resolved when a mask opens: font face, size and mode.
@@ -163,6 +163,35 @@ pub unsafe fn dismiss() {
         if IsWindow(Some(parent)).as_bool() {
             crate::frame::set_result(parent, false);
         }
+    }
+}
+
+/// Mask Ctrl+C: copy the whole result, then leave the result view. With auto
+/// OCR armed the session stays armed but paused and the frame returns to Move;
+/// otherwise the frame is put away.
+unsafe fn copy_all_and_close(hwnd: HWND) {
+    let (text, parent) = {
+        let s = state(hwnd);
+        (all_text(&s.words), s.parent)
+    };
+    // Read the session state before dismiss: destroying the mask must not
+    // change whether C-c pauses an armed auto session or closes the frame.
+    let auto = crate::ocr::auto_enabled();
+    match crate::capture::copy_text(hwnd, &text) {
+        Ok(()) => {
+            logline(&format!(
+                "mask: Ctrl+C copied {} chars: {}",
+                text.chars().count(),
+                preview(&text)
+            ));
+            dismiss();
+            if auto {
+                crate::frame::finish_auto_copy(parent);
+            } else {
+                crate::frame::hide(parent);
+            }
+        }
+        Err(e) => logline(&format!("mask: Ctrl+C copy failed: {e:#}")),
     }
 }
 
@@ -1405,8 +1434,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             dismiss();
             LRESULT(0)
         }
-        WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_ESCAPE => {
-            dismiss();
+        WM_KEYDOWN => {
+            let key = VIRTUAL_KEY(wparam.0 as u16);
+            if GetKeyState(VK_CONTROL.0 as i32) < 0 && key.0 == 0x43 {
+                copy_all_and_close(hwnd);
+                return LRESULT(0);
+            }
+            if key == VK_ESCAPE {
+                dismiss();
+            }
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_ACTIVATE as isize),

@@ -272,6 +272,19 @@ fn dispatch(action: Action, frame: HWND) {
             Action::AutoOcr => {
                 // Second press ends the session: no more refreshes, frame gone.
                 if ocr::auto_enabled() {
+                    if ocr::auto_paused() {
+                        mask::dismiss();
+                        frame::prepare_ocr(frame, ocr::Intent::Auto, true);
+                        ocr::resume_auto(frame);
+                        if let Err(e) = ocr::start(frame) {
+                            logline(&format!("auto OCR resume failed: {e:#}"));
+                            frame::clear_flash(frame);
+                            ocr::disable_auto();
+                        } else {
+                            logline("auto OCR: resumed");
+                        }
+                        return;
+                    }
                     ocr::disable_auto();
                     mask::dismiss();
                     frame::hide(frame);
@@ -289,6 +302,7 @@ fn dispatch(action: Action, frame: HWND) {
                 ocr::enable_auto(frame);
                 if let Err(e) = ocr::start(frame) {
                     logline(&format!("auto OCR failed: {e:#}"));
+                    frame::clear_flash(frame);
                     ocr::disable_auto();
                 }
                 logline("auto OCR: on");
@@ -370,25 +384,28 @@ pub(crate) fn frame_quick_save(frame: HWND) {
     }
 }
 
-/// Focused-frame Ctrl+S: pick the folder first, then save. A modal dialog
-/// leaves an animation behind, so let it fade before grabbing.
+/// Focused-frame Ctrl+S: file save dialog starting in `[capture] dir` with the
+/// default timestamped name. A modal dialog leaves an animation behind, so let
+/// it fade before grabbing.
 pub(crate) fn frame_save_as(frame: HWND) {
-    let dir = match unsafe { capture::choose_dir(frame) } {
-        Ok(Some(dir)) => dir,
+    let name = capture::default_capture_name();
+    let path = match unsafe { capture::choose_file(frame, &capture_dir(), &name) } {
+        Ok(Some(path)) => path,
         Ok(None) => return,
         Err(e) => {
-            logline(&format!("folder picker failed: {e:#}"));
+            logline(&format!("save dialog failed: {e:#}"));
             return;
         }
     };
     std::thread::sleep(std::time::Duration::from_millis(220));
-    if let Err(e) = unsafe { capture::save_frame(frame, &dir.to_string_lossy()) } {
+    if let Err(e) = unsafe { capture::save_frame_to(frame, &path) } {
         logline(&format!("save frame failed: {e:#}"));
     }
 }
 
 pub(crate) fn frame_copy(frame: HWND) {
-    if let Err(e) = unsafe { capture::copy_frame(frame) } {
+    let keep_open = unsafe { frame::is_pinned(frame) };
+    if let Err(e) = unsafe { capture::copy_frame(frame, keep_open) } {
         logline(&format!("copy frame failed: {e:#}"));
     }
 }

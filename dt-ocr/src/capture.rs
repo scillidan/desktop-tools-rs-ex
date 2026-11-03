@@ -138,13 +138,21 @@ impl Shot {
         std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {dir}"))?;
         let st = unsafe { GetLocalTime() };
         let path = std::path::Path::new(&dir).join(file_name(&st));
+        self.save_png_to(&path)?;
+        Ok(path)
+    }
+
+    fn save_png_to(&self, path: &std::path::Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
         let data = self.bgra();
         let (w, h) = (self.w as u32, self.h as u32);
         // WinRT's PNG encoder: no dependency, and the empty file opens as a
         // stream without the StorageFile folder dance.
-        std::fs::File::create(&path)
-            .with_context(|| format!("cannot create {}", path.display()))?;
-        let write = path.clone();
+        std::fs::File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        let write = path.to_path_buf();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = unsafe {
@@ -164,7 +172,7 @@ impl Shot {
             let _ = tx.send(result);
         });
         match rx.recv() {
-            Ok(Ok(())) => Ok(path),
+            Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e),
             Err(e) => Err(anyhow!("PNG worker vanished: {e}")),
         }
@@ -662,36 +670,73 @@ pub unsafe fn pin_window(style: crate::pin::Style) -> Result<()> {
     pin_rect(window_target()?, style)
 }
 
-/// Folder picker for Ctrl+S. `SHBrowseForFolderW` needs no extra COM wiring
-/// and returns one path.
-pub unsafe fn choose_dir(owner: HWND) -> Result<Option<std::path::PathBuf>> {
-    use std::ffi::c_void;
-    use windows::core::w;
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{
-        SHBrowseForFolderW, SHGetPathFromIDListW, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS,
-        BROWSEINFOW,
+/// File save dialog for Ctrl+S: starts in `[capture] dir` with the default
+/// timestamped name. Cancel returns `None` and leaves the frame alone.
+pub unsafe fn choose_file(
+    owner: HWND,
+    dir: &str,
+    name: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    use windows::core::{w, PCWSTR, PWSTR};
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetSaveFileNameW, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     };
-    let mut shown = [0u16; 260];
-    let bi = BROWSEINFOW {
+    let initial = expand_env(dir);
+    let initial = if initial.is_empty() {
+        "%USERPROFILE%\\Pictures".to_string()
+    } else {
+        initial
+    };
+    let initial: Vec<u16> = initial.encode_utf16().chain(std::iter::once(0)).collect();
+    let filter: Vec<u16> = "PNG image\0*.png\0All files\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let mut file = vec![0u16; 1024];
+    let n = name.encode_utf16().take(file.len() - 1).count();
+    for (slot, unit) in file.iter_mut().zip(name.encode_utf16().take(n)) {
+        *slot = unit;
+    }
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner,
-        pszDisplayName: windows::core::PWSTR(shown.as_mut_ptr()),
-        lpszTitle: w!("Choose the folder for this capture"),
-        ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        lpstrFilter: PCWSTR(filter.as_ptr()),
+        lpstrFile: PWSTR(file.as_mut_ptr()),
+        nMaxFile: file.len() as u32,
+        lpstrInitialDir: PCWSTR(initial.as_ptr()),
+        lpstrTitle: w!("Save capture"),
+        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST,
+        lpstrDefExt: w!("png"),
         ..Default::default()
     };
-    let pidl = SHBrowseForFolderW(&bi);
-    if pidl.is_null() {
+    if !GetSaveFileNameW(&mut ofn).as_bool() {
         return Ok(None); // cancelled
     }
-    let mut path = [0u16; 260];
-    let ok = SHGetPathFromIDListW(pidl, &mut path).as_bool();
-    CoTaskMemFree(Some(pidl as *const c_void));
-    ensure!(ok, "the selected folder has no filesystem path");
-    let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
     Ok(Some(std::path::PathBuf::from(String::from_utf16_lossy(
-        &path[..len],
+        &file[..len],
     ))))
+}
+
+/// The timestamped default name used by quick-save and the save dialog.
+pub fn default_capture_name() -> String {
+    unsafe { file_name(&GetLocalTime()) }
+}
+
+/// Saves the frame rect to an explicit path, then puts the frame away.
+pub unsafe fn save_frame_to(hwnd: HWND, path: &std::path::Path) -> Result<()> {
+    let rect = visible_rect(hwnd)?;
+    let _ = ShowWindow(hwnd, SW_HIDE);
+    let result = grab(rect).and_then(|shot| {
+        shot.save_png_to(path).map(|()| {
+            logline(&format!("capture: frame -> {}", path.display()));
+        })
+    });
+    if result.is_err() {
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    } else {
+        crate::frame::hide(hwnd);
+    }
+    result
 }
 
 /// Saves the frame rect, then puts the frame away. The frame is hidden during
@@ -706,19 +751,34 @@ pub unsafe fn save_frame(hwnd: HWND, dir: &str) -> Result<()> {
     });
     if result.is_err() {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    } else {
+        crate::frame::hide(hwnd);
     }
     result
 }
 
-/// Copies the frame rect, then puts the frame away; no OCR and no file.
-pub unsafe fn copy_frame(hwnd: HWND) -> Result<()> {
+/// Copies the frame rect. Non-pinned frames are put away afterwards; a pinned
+/// frame is only hidden for the grab and shown again, so the pin survives.
+pub unsafe fn copy_frame(hwnd: HWND, keep_open: bool) -> Result<()> {
     let rect = visible_rect(hwnd)?;
     let _ = ShowWindow(hwnd, SW_HIDE);
     let result = grab(rect).and_then(|shot| shot.into_clipboard(hwnd));
     if result.is_err() {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    } else if keep_open {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        logline("capture: frame -> clipboard, pinned frame kept");
     } else {
         logline("capture: frame -> clipboard, frame hidden");
+        crate::frame::hide(hwnd);
     }
     result
 }

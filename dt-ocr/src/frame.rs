@@ -31,9 +31,10 @@ const BAR_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0) — status strip bg / in
 const TEXT_BLACK: u32 = 0x00000000;
 const TUNE_RED: u32 = 0x000000FF; // RGB(255, 0, 0) — value clamped at the monitor limit
 const FLASH_CYAN: u32 = 0x00FFFF00; // RGB(0, 255, 255) — image capture feedback
-const FLASH_GREEN: u32 = 0x0000FF00; // RGB(0, 255, 0) green — OCR result
-                                     // APPWINDOW gives the shell a per-virtual-desktop application view.
-                                     // Without it this popup is considered current on every desktop.
+const FLASH_TRIGGER: u32 = 0x002FFFAD; // GreenYellow #ADFF2F — OCR trigger
+const FLASH_RESULT: u32 = 0x0032CD32; // LimeGreen #32CD32 — OCR result
+                                      // APPWINDOW gives the shell a per-virtual-desktop application view.
+                                      // Without it this popup is considered current on every desktop.
 const FRAME_EX_STYLE: WINDOW_EX_STYLE =
     WINDOW_EX_STYLE(WS_EX_LAYERED.0 | WS_EX_TOPMOST.0 | WS_EX_NOACTIVATE.0 | WS_EX_APPWINDOW.0);
 const EDGE: i32 = 6; // border hit zone (px) for the spec-mode resize handles
@@ -46,7 +47,8 @@ const STRIP_GAP: i32 = 2;
 enum Flash {
     None,
     Cyan,
-    Green,
+    Trigger,
+    Result,
 }
 
 /// Result held for one short result-border flash before it is shown.
@@ -461,7 +463,16 @@ pub unsafe fn flash_capture(hwnd: HWND) {
 /// OCR result feedback: green until the result is dismissed.
 pub unsafe fn flash_result(hwnd: HWND) {
     state(hwnd).result = true;
-    flash(hwnd, Flash::Green);
+    flash(hwnd, Flash::Result);
+}
+
+/// Clear trigger/result border feedback after a failed start.
+pub unsafe fn clear_flash(hwnd: HWND) {
+    if let Some(s) = state_opt(hwnd) {
+        s.flash = Flash::None;
+        s.result = false;
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
 }
 
 /// Keep the border green while a result window is on screen.
@@ -492,9 +503,9 @@ pub unsafe fn accept_result(hwnd: HWND, seq: u64) -> bool {
 }
 
 /// Ctrl+Alt+S: pause automatic OCR and discard the in-flight result while the
-/// user adjusts the frame. Ctrl+Shift+Alt+O starts a fresh session.
+/// user adjusts the frame. Ctrl+Shift+Alt+O resumes the armed session.
 pub unsafe fn pause_ocr(hwnd: HWND) {
-    crate::ocr::disable_auto();
+    crate::ocr::pause_auto();
     crate::ocr::finished(hwnd);
     logline("ocr: paused for frame adjustment");
     let s = state(hwnd);
@@ -542,12 +553,35 @@ pub unsafe fn prepare_ocr(hwnd: HWND, intent: crate::ocr::Intent, alpha: bool) {
     s.ocr_intent = intent;
     s.pending = None;
     s.result = false;
-    s.flash = Flash::None;
+    s.flash = Flash::Trigger;
     let _ = KillTimer(Some(hwnd), 4);
     let _ = KillTimer(Some(hwnd), 6);
+    let _ = InvalidateRect(Some(hwnd), None, false);
     if alpha {
         flash_alpha(hwnd);
     }
+}
+
+/// Mask Ctrl+C while automatic OCR is armed: the result view goes away, the
+/// arm stays on, and the next source change triggers a fresh OCR after the
+/// settle delay. The frame returns to Move and stays on screen.
+pub unsafe fn finish_auto_copy(hwnd: HWND) {
+    crate::ocr::finished(hwnd);
+    let s = state(hwnd);
+    s.pending = None;
+    s.result = false;
+    s.flash = Flash::None;
+    s.ocr_seq = None;
+    s.ocr_running = false;
+    let _ = KillTimer(Some(hwnd), 4);
+    let _ = KillTimer(Some(hwnd), 5);
+    let _ = KillTimer(Some(hwnd), 6);
+    set_frame_alpha(hwnd, 255);
+    set_mode(hwnd, Mode::Move);
+    let _ = SetForegroundWindow(hwnd);
+    let _ = SetFocus(Some(hwnd));
+    let _ = InvalidateRect(Some(hwnd), None, false);
+    logline("ocr: result copied; auto OCR stays armed, frame back to Move");
 }
 
 /// Switch to Move mode from any state (including Pinned), then focus the
@@ -597,6 +631,12 @@ unsafe fn set_mode(hwnd: HWND, next: Mode) {
     }
     redraw_now(hwnd);
     logline(&format!("mode: {next:?}"));
+}
+
+/// True when the frame is pinned (click-through). The frame can still receive
+/// Ctrl+C while it holds keyboard focus, and that copy must not unpin it.
+pub unsafe fn is_pinned(hwnd: HWND) -> bool {
+    state_opt(hwnd).is_some_and(|s| s.mode == Mode::Pinned)
 }
 
 /// ctrl+shift+alt+t toggles between Pinned and Move from any state.
@@ -669,6 +709,11 @@ unsafe fn switch_tune(hwnd: HWND, field: TuneField) {
 /// Closing the frame hides it; any command summons it back without stealing
 /// focus.
 pub unsafe fn ensure_visible(hwnd: HWND) {
+    if !crate::desktops::is_on_current(hwnd) {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        logline("frame: not on the current virtual desktop; kept hidden");
+        return;
+    }
     if !IsWindowVisible(hwnd).as_bool() {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     }
@@ -701,6 +746,10 @@ pub unsafe fn hide(hwnd: HWND) {
 /// Any in-progress size input is discarded: a freshly placed frame starts
 /// in the plain draggable state.
 pub unsafe fn place(hwnd: HWND, rect: Rect) {
+    if !crate::desktops::is_on_current(hwnd) {
+        logline("frame: place ignored (window is on another virtual desktop)");
+        return;
+    }
     set_mode(hwnd, Mode::Move);
     SetWindowPos(
         hwnd,
@@ -1079,6 +1128,31 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let mode = state(hwnd).mode;
             let key = VIRTUAL_KEY(wparam.0 as u16);
             let ch = (wparam.0 as u8 as char).to_ascii_lowercase();
+            let ctrl = GetKeyState(VK_CONTROL.0 as i32) < 0;
+            let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
+            // Image copy works from every mode, including Pinned while the
+            // frame holds focus; save/pin stay disabled on a pinned frame.
+            if ctrl && ch == 'c' {
+                crate::frame_copy(hwnd);
+                return LRESULT(0);
+            }
+            if ctrl && mode != Mode::Pinned {
+                match ch {
+                    's' if shift => {
+                        crate::frame_quick_save(hwnd);
+                        return LRESULT(0);
+                    }
+                    's' => {
+                        crate::frame_save_as(hwnd);
+                        return LRESULT(0);
+                    }
+                    'p' => {
+                        crate::frame_pin(hwnd);
+                        return LRESULT(0);
+                    }
+                    _ => {}
+                }
+            }
             match mode {
                 Mode::Tune => {
                     let shift = GetKeyState(VK_SHIFT.0 as i32) < 0;
@@ -1209,6 +1283,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             prepare_ocr(hwnd, crate::ocr::Intent::Manual, false);
             if let Err(e) = crate::ocr::start(hwnd) {
                 logline(&format!("ocr capture failed: {e:#}"));
+                clear_flash(hwnd);
             }
             LRESULT(0)
         }
@@ -1260,12 +1335,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 Ok(_) => {
                     logline("ocr: no words found");
+                    state(hwnd).flash = Flash::None;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                     if intent == crate::ocr::Intent::Quick {
                         state(hwnd).pending = Some(PendingResult::HideFrame);
                         let _ = SetTimer(Some(hwnd), 6, 60, None);
                     }
                 }
-                Err(e) => logline(&format!("ocr failed: {e:#}")),
+                Err(e) => {
+                    logline(&format!("ocr failed: {e:#}"));
+                    state(hwnd).flash = Flash::None;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
             }
             LRESULT(0)
         }
@@ -1539,8 +1620,9 @@ unsafe fn tune_limit(hwnd: HWND, field: TuneField) -> i32 {
 fn border_color(flash: Flash, result: bool, mode: Mode) -> u32 {
     match flash {
         Flash::Cyan => FLASH_CYAN,
-        Flash::Green => FLASH_GREEN,
-        Flash::None if result => FLASH_GREEN,
+        Flash::Trigger => FLASH_TRIGGER,
+        Flash::Result => FLASH_RESULT,
+        Flash::None if result => FLASH_RESULT,
         Flash::None => match mode {
             Mode::Move => BORDER_DRAG,
             Mode::Pinned => BORDER_PINNED,
@@ -2078,11 +2160,21 @@ mod tests {
 
     #[test]
     fn result_border_stays_green_until_dismissed() {
-        assert_eq!(border_color(Flash::None, true, Mode::Move), FLASH_GREEN);
-        assert_eq!(border_color(Flash::None, true, Mode::Pinned), FLASH_GREEN);
-        assert_eq!(border_color(Flash::None, true, Mode::Tune), FLASH_GREEN);
+        assert_eq!(border_color(Flash::None, true, Mode::Move), FLASH_RESULT);
+        assert_eq!(border_color(Flash::None, true, Mode::Pinned), FLASH_RESULT);
+        assert_eq!(border_color(Flash::None, true, Mode::Tune), FLASH_RESULT);
+        assert_eq!(
+            border_color(Flash::Trigger, false, Mode::Move),
+            FLASH_TRIGGER
+        );
         assert_eq!(border_color(Flash::None, false, Mode::Move), BORDER_DRAG);
         assert_eq!(border_color(Flash::Cyan, true, Mode::Move), FLASH_CYAN);
+    }
+
+    #[test]
+    fn ocr_trigger_and_result_colours_are_distinct() {
+        assert_eq!(FLASH_TRIGGER, 0x002F_FFAD); // GreenYellow #ADFF2F
+        assert_eq!(FLASH_RESULT, 0x0032_CD32); // LimeGreen #32CD32
     }
 
     #[test]

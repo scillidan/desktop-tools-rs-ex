@@ -107,16 +107,17 @@ icon.
 
 ## Capture sinks
 
-`capture` (ctrl+enter) grabs the frame region for OCR and the clipboard. Manual
-OCR dims the frame to 66% for ~180 ms at the trigger; a successful result turns
-the border green (RGB 0,255,0) and it STAYS green while the mask or outside
-editor is open. The mask covers the frame rect, so it paints the same
-2 px green edge itself; the border returns to the mode colour when the result is
-dismissed or hidden.
+`capture` (ctrl+enter) grabs the frame region for OCR and the clipboard. Every
+OCR trigger turns the border GreenYellow (#ADFF2F) while recognition runs; a
+successful result turns it green (LimeGreen #32CD32) and it STAYS green while
+the mask or outside editor is open. The mask covers the frame rect, so it paints
+the same 2 px green edge itself; the border returns to the mode colour when the
+result is dismissed or hidden. A manual trigger also dims the frame to 66% for
+~180 ms.
 
 `quick_ocr` (ctrl+alt+o) draws a region, OCRs it, copies the whole text to the
-clipboard, flashes green and closes the frame. No mask is shown, so this one is
-a brief green beat before it disappears. The copy reflows wrapped OCR lines back
+clipboard, shows the GreenYellow trigger and then the LimeGreen result beat, and
+closes the frame. No mask is shown. The copy reflows wrapped OCR lines back
 into their paragraph (blank line between paragraphs), matching a direct screen
 selection instead of emitting every visual line.
 
@@ -127,7 +128,10 @@ configured `[ocr] auto_delay_ms` debounce and re-OCRs. Pressing `ctrl+alt+s`
 pauses the session, discards any in-flight result and returns the frame to
 normal resize mode; `ctrl+shift+alt+o` starts a fresh session. The same hotkey
 turns it off and closes the frame; hiding the frame any other way also stops it.
-Drawing (`ctrl+alt+d`), `ctrl+alt+w` and moving/resizing never arm it.
+Mask `Ctrl+C` copies the whole result; with auto OCR armed the mask closes,
+the frame returns to Move and stays on screen, the session stays armed and the
+next source change triggers a fresh OCR after the settle delay. Drawing
+(`ctrl+alt+d`), `ctrl+alt+w` and moving/resizing never arm it.
 
 Only `draw`, `frame_window`, `quick_ocr`, `auto_ocr` and the no-frame
 `pin_shot` may run without a visible frame; resize/pin/capture/move/toggle log
@@ -150,11 +154,15 @@ is stale and every GDI call on it fails.
 file. A visible frame decides the source: its own rect, with the frame hidden
 for the grab and put away after a successful pin. With no frame it pins the
 focused window (same target chain). The command must not re-show a hidden frame,
-or it would pin the wrong thing. Ctrl+P on a focused Move frame is the explicit
-form of the same pin action. Ctrl+Shift+S saves that rect straight to
-`[capture] dir`; Ctrl+S opens a folder picker (`SHBrowseForFolderW`) and saves
-there; both close the frame. Ctrl+C copies it and closes the frame. Only those
-save keys write PNG.
+or it would pin the wrong thing. On a focused frame in Move or any resize
+substate: Ctrl+C copies the image and closes the frame; Ctrl+Shift+S saves the
+rect straight to `[capture] dir` with the timestamped default name and closes;
+Ctrl+S opens a `GetSaveFileNameW` dialog starting in `[capture] dir` with that
+name prefilled, then saves there and closes; Ctrl+P is the explicit pin. Ctrl+C
+also works on a Pinned frame while it holds keyboard focus, but then it only
+hides the frame for the grab and re-shows it, so the pin survives; the other
+keys stay disabled on Pinned. Cancel leaves the frame alone. Only the save keys
+write PNG.
 
 A pinned shot is a borderless layered tool window: drag inside to move
 (`HTCAPTION`), and drag an image edge/corner through our own mouse capture to
@@ -169,9 +177,10 @@ ghosts. Esc/right-click closes; creation fits the image into the work area.
 Existing pins keep the style they were created with. No per-desktop pinning yet.
 
 `flash_capture` flashes the image-capture border cyan (RGB(0,255,255)); OCR
-results use green (RGB(0,255,0)) on timer 4 for 180 ms, then a
-200 ms timer reveals the mask/editor or closes a quick-OCR frame. A manual OCR
-trigger also sets frame opacity to 168/255 (66%) and restores it on timer 5.
+triggers hold GreenYellow (#ADFF2F) until the result replaces it, then
+the result is LimeGreen (#32CD32) on timer 4 for 180 ms before the 200 ms
+timer reveals the mask/editor or closes a quick-OCR frame. A manual OCR trigger
+also sets frame opacity to 168/255 (66%) and restores it on timer 5.
 Esc on a focused Move frame puts it away; both `place()` callers
 (a completed draw and ctrl+alt+w) focus the frame, so their Esc and Ctrl+S /
 Ctrl+Shift+S / Ctrl+C / Ctrl+P behavior is identical. The daemon stays resident and any command brings it
@@ -271,7 +280,10 @@ taskbar); false uses the full monitor and hot-reloads. The frame needs
 WS_EX_APPWINDOW (and no WS_EX_TOOLWINDOW): without a shell application view,
 GetWindowDesktopId fails and it follows every desktop. `desktops.rs` keeps one
 frame per desktop, creates/reuses it on the current desktop's global hotkey,
-and merges duplicates after a desktop closes. `tray.rs` uses
+and merges duplicates after a desktop closes. Both `frame::place` and
+`frame::ensure_visible` call `desktops::is_on_current` first, so a stale frame
+handle can never be shown on the wrong desktop (it is hidden instead). Pins stay
+`WS_EX_TOOLWINDOW` and global; per-desktop pins are not implemented. `tray.rs` uses
 Shell_NotifyIconW with exe icon resource 1 and a right-click Quit menu; the
 shell sends its callback to the host window, which handles it in its own
 window procedure (see Resident host). `tray::notify` reuses that icon for the
@@ -366,13 +378,18 @@ arm it. `[ocr] auto_delay_ms` (default 1000, range 100–60000) is the debounce.
 The 250 ms host timer samples the frame only while armed (config is polled every
 fourth tick). The first sample establishes a 48×27 luma fingerprint baseline;
 blank renders are ignored. The first material change (≥0.5% of samples beyond
-the per-pixel delta) immediately dismisses the stale mask, then the delay later
-starts OCR if the source is still changed. Esc on a result hides it but leaves
-the armed session alone; the next change OCRs again. Sampling tries ordinary
+the per-pixel delta) immediately dismisses the stale mask; every further change
+restarts the settle timer, and OCR starts only after the source has been stable
+for `auto_delay_ms`. Esc on a result hides it but leaves the armed session alone;
+the next change OCRs again. Mask `Ctrl+C` copies the whole result and leaves the
+armed session armed (it only closes the result view), returning the frame to
+Move; the next source change triggers a fresh OCR. Sampling tries ordinary
 `PrintWindow`, then `PW_RENDERFULLCONTENT` and finally the window DC, keeping the
 first render with real contrast (plain `PrintWindow` returned a blank surface on
 real apps here); `ocr_actions_test.ps1` covers the no-frame guard, outside
-editor, arming/refreshing/pausing/switching off and quick OCR (22 checks), and
+editor, arming/refreshing/pausing/switching off and quick OCR (22 checks),
+`mask_copy_test.ps1` covers non-auto copy-and-hide plus auto copy staying armed
+and refreshing on the next change (11 checks), and
 `editor_test.ps1` covers the persistent green result border, the mono editor
 font, exact preloaded text with no trailing heap garbage, the absence of a
 scrollbar and pause/resume (15 checks); `outside_lines_test.ps1` covers
@@ -380,14 +397,21 @@ paragraph breaks and CRLF in the editor (2 checks); `edit_keys_test.ps1` covers
 Ctrl+Z/Y, Ctrl+A and token-wise Ctrl+Left/Right including Shift+Ctrl across a
 line break (19 checks).
 
-P0.7 status: the result edge is green while a mask or outside editor is open
-(the mask paints it too, because it covers the frame). `box+outside` is the
-native multi-line EDIT described above. `[notify] enabled` (default `false`,
-hot-reloaded) sends one tray balloon/toast after a **manual** OCR result and
-after a successful quick-OCR copy; automatic refreshes stay silent, and
-`NIIF_NOSOUND` keeps the notification quiet when enabled. A missing tray icon
-or a shell refusal only logs a warning. `notify_test.ps1` covers the manual
-result notification (2 checks).
+P0.7 status: the result edge is LimeGreen (#32CD32) while a mask or outside
+editor is open (the mask paints it too, because it covers the frame), and every
+OCR trigger holds GreenYellow (#ADFF2F) while recognition runs. Mask `Ctrl+C`
+copies the whole result and leaves the result view: normally the frame is put
+away; with auto OCR armed the frame returns to Move and the session stays armed,
+waiting for the next source change. `box+outside` is the native multi-line EDIT
+described above.
+`[notify] enabled` (default `false`, hot-reloaded) sends one tray balloon/toast
+after a **manual** OCR result and after a successful quick-OCR copy; automatic
+refreshes stay silent, and `NIIF_NOSOUND` keeps the notification quiet when
+enabled. A missing tray icon or a shell refusal only logs a warning.
+`notify_test.ps1` covers the manual result notification (2 checks). Image keys
+(`Ctrl+C`, `Ctrl+Shift+S`, `Ctrl+S`, `Ctrl+P`) work from Move and every resize
+substate; on Pinned only `Ctrl+C` works and keeps the pin. `frame_image_keys_test.ps1`
+covers image copy and quick-save from resize plus pinned copy (8 checks).
 
 ## Design decisions (the part worth copying into other tools)
 
@@ -417,6 +441,9 @@ result notification (2 checks).
 | P0.7 | Result state keeps the frame/result edge green until dismissal | the mask covers the frame border, so a one-shot flash was invisible; the mask paints the same edge itself |
 | P0.7 | Outside editor is a stock multi-line EDIT plus our undo/token keys | native editing/IME/selection stay intact; only undo history, token jumps, Ctrl+A and the mono font are ours |
 | P0.7 | Notifications are opt-in and never fire on automatic refreshes | the feature is useful for a manual "OCR is ready" beat but becomes noise when auto OCR runs every second |
+| P0.7 | Mask `Ctrl+C` copies all and keeps auto armed in Move | the result view is out of the way but the next source change still refreshes; only `ctrl+alt+s` pauses a session |
+| P0.7 | Image keys are captured before the mode-specific key handling | Move and all resize substates behave the same; Pinned still accepts Ctrl+C while focused and keeps its pin |
+| P1.2 | `Ctrl+S` is a save-file dialog, `Ctrl+Shift+S` is the directory quick-save | one key to name a file, one key for the no-dialog path; the dialog starts where captures normally go |
 | P0.6 | Releases and Scoop manifests use the `-ex` naming; the hash stays empty until the first release | assets and manifest autoupdate must agree; never call an unreleased package installable |
 
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

@@ -24,14 +24,23 @@ in `AGENTS.md`; this file is only what is left to build.
 - **P0.5** automatic OCR: armed only by `ctrl+shift+alt+o` (existing frame OCRs
   immediately, no frame draws), `[ocr] auto_delay_ms` debounce (default 1000 ms),
   250 ms source-window sampling with a PrintWindow → PW_RENDERFULLCONTENT →
-  window-DC render fallback, immediate stale-mask dismissal, re-OCR without
+  window-DC render fallback, immediate stale-mask dismissal, a settle timer that
+  restarts on every material change, re-OCR without
   writing the clipboard. A second press stops auto OCR and closes the frame;
-  `ctrl+alt+s` pauses and drops any in-flight result while the frame is resized.
+  `ctrl+alt+s` pauses and drops any in-flight result while the frame is resized;
+  mask `Ctrl+C` copies and stays armed, returning Move.
 - **P0.5.1** Esc/right-click dismiss a mask while an armed auto session stays
   armed; yellow resize/status/selection colours replaced with orange.
 - **Quick OCR** `ctrl+alt+o` draws, OCRs, copies the whole text reflowed into
-  paragraphs, flashes green and closes the frame. `ocr_actions_test.ps1` passes
-  22/22.
+  paragraphs, holds GreenYellow while recognizing, shows LimeGreen on the result and
+  closes the frame. `ocr_actions_test.ps1` passes 22/22.
+- **Result copy** mask `Ctrl+C` copies the whole OCR result; without auto OCR it
+  closes the frame, with auto OCR it returns to Move and stays armed, waiting for
+  the next source change. `mask_copy_test.ps1` passes 11/11.
+- **Image keys** from Move or any resize substate: `Ctrl+C` copies the frame
+  image and closes, `Ctrl+Shift+S` quick-saves to `[capture] dir`, `Ctrl+S` opens
+  a save-file dialog there, `Ctrl+P` pins. On a focused Pinned frame only
+  `Ctrl+C` works and keeps the pin. `frame_image_keys_test.ps1` passes 8/8.
 - **Outside editor** native EDIT with its own 200-step undo/redo, token-wise
   Ctrl+Left/Right (Shift+Ctrl included, line breaks handled), Ctrl+A, no
   scrollbar, and topmost floating when the preferred side is short.
@@ -53,8 +62,10 @@ in `AGENTS.md`; this file is only what is left to build.
   undo/redo history, Ctrl+A and token-wise plain Ctrl+Left/Right; Esc closes.
 - Done: optional tray notification after a manual OCR result and a quick-OCR
   copy; silent by default, never on automatic refreshes.
-- **Selection polish**: token-range anchor→head selection, shift/ctrl extend,
-  double-click paragraph, Ctrl+A; successful copy flashes cyan twice.
+- Done: mask `Ctrl+C` copies the whole result and leaves the result view, with
+  the auto-OCR pause/Move behaviour above. The old selection-polish idea
+  (token-range anchor/head, double-click paragraph, copy flash) is dropped —
+  click/drag copy and the outside editor cover the real use.
 
 ## P1 — Parity with the existing AHK tools + more
 
@@ -64,12 +75,13 @@ in `AGENTS.md`; this file is only what is left to build.
   capture, so the OCR flow is "frame it, then ctrl+enter". `frame_window_test.ps1`.
 - Done: `pin_shot` (ctrl+alt+p) pins the frame's rect when a frame is on screen
   (frame hidden for the grab, frame put away after) and the focused window
-  otherwise; no clipboard and no file. Ctrl+Shift+S saves straight to
-  `[capture] dir`, Ctrl+S opens a folder picker and saves there, Ctrl+C copies
-  and closes, Ctrl+P is the explicit pin. Both `place()` callers focus the
-  frame, so Esc works after a draw too. `pin_resize_test.ps1` (8 checks),
-  `pin_no_frame_test.ps1` (3), `pin_border_modes_test.ps1` (2),
-  `frame_focus_test.ps1` + the `pin` unit tests.
+  otherwise; no clipboard and no file. From Move or a resize substate (not
+  Pinned), Ctrl+Shift+S saves straight to `[capture] dir`, Ctrl+S opens a
+  save-file dialog there, Ctrl+C copies and closes, Ctrl+P is the explicit pin.
+  Both `place()` callers focus the frame, so Esc works after a draw too.
+  `pin_resize_test.ps1` (8 checks), `pin_no_frame_test.ps1` (3),
+  `pin_border_modes_test.ps1` (2), `frame_focus_test.ps1` + the `pin` unit
+  tests.
 - Done: cyan capture flash; `[pin] border = hatch | line | none` (hatch is a
   6 px translucent diagonal shadow, `hatch-color` cyan by default; line uses
   `line-color`), and hovering an edge shows only the resize-arrow cursor. Pin
@@ -78,13 +90,44 @@ in `AGENTS.md`; this file is only what is left to build.
 - Done: tray menu uses the native `TrackPopupMenu` flow from desktop-tools-rs,
   with a foreground host owner and `WM_NULL` cleanup. Hiding a frame also hides
   its status strip; startup creates no visible frame. Single-instance mutex.
-- Next: a floating action bar after a selection (copy / save / pin / flameshot /
-  record on one rect), per-desktop pinning, and the bridges (flameshot `gui`,
-  the recording tool once P1.3 lands). Flameshot stays the better free-form
-  capture; dt-ocr owns the frame-for-OCR workflow.
+- Next: a floating action bar after a selection (copy / save / pin), per-desktop
+  pinning, and the bridges planned separately in P1.5 (Flameshot) and P1.6
+  (recording). Flameshot stays the better free-form capture; dt-ocr owns the
+  frame-for-OCR workflow.
 - Done when: a focused-window capture reaches clipboard, disk and a pinned
   window, and the show-desktop case captures something sensible instead of
   failing.
+
+### P1.5 Flameshot bridge (separate plan)
+- Goal: any visible frame hands its rect to Flameshot's own region UI; dt-ocr
+  does not grow a second screenshot editor (no colour picker, arrows, blur,
+  OCR-of-screenshot, etc.).
+- Proposed key: `Ctrl+Alt+F` on a frame (free today). Candidate command:
+  `flameshot gui --region WxH+X+Y` (verify the exact CLI at implementation
+  time; flameshot accepts a region/geometry argument in current releases).
+- Flow: remember rect → hide the frame → launch Flameshot with that region →
+  restore the frame when Flameshot exits. Missing `flameshot.exe` logs and
+  leaves the frame alone. Config: `[external] flameshot = "flameshot"` (PATH or
+  absolute).
+- Acceptance: frame over a window + key opens Flameshot preselected to exactly
+  that rect; no dt-ocr image/file is written; a missing executable is a visible
+  warning, not a crash.
+- Open: multi-monitor negative coordinates, and whether Flameshot should keep
+  running after the frame is restored.
+
+### P1.6 Recording bridge (separate plan)
+- Goal: any visible frame's rect starts/stops the P1.3 recorder; the frame stays
+  as the visual guide while recording.
+- Proposed key: `Ctrl+Alt+R` on a frame (start/stop). Output goes to
+  `[record] dir` with the same timestamped naming as captures; config carries
+  fps/quality once P1.3 exists.
+- Flow: start → frame stays visible but click-through? (decide) → second key
+  stops → writes the file and logs the path. No frame = ignore.
+- Depends on P1.3 (DDA + ffmpeg); do not build a second encoder here.
+- Acceptance: start/stop from a frame produces a file whose content matches the
+  framed rect; the frame never appears in the recording.
+- Open: whether the frame should be hidden during capture (like image copy) or
+  kept as a guide; audio; cursor.
 
 ### P1.3 Recording (wcap model)
 - The maintainer's own experience: `wcap.exe` is unreliable — it mostly managed

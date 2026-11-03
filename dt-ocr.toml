@@ -24,8 +24,9 @@ scale = 4
 # auto falls back to the built-in Windows OCR when they are unavailable.
 language = "auto"
 # Automatic OCR is OFF until ctrl+shift+alt+o. After the framed source changes
-# materially, the stale result is removed immediately and OCR restarts after
-# this debounce. The hotkey toggles the session off and closes the frame.
+# materially, the stale result is removed immediately; every further change
+# restarts the settle timer, and OCR restarts only after the source has been
+# stable for this long. The hotkey toggles the session off and closes the frame.
 auto_delay_ms = 1000
 
 [mask]
@@ -43,9 +44,11 @@ fill = "lines"
 font = "Sarasa Term SC Nerd"
 size = 10
 
-# Ctrl+Shift+S on a focused Move frame saves its region here, then closes the
-# frame. Ctrl+S asks for a folder each time. Pinning never writes a file.
-# `%VAR%` expands; empty makes the quick-save key report an error.
+# Ctrl+Shift+S on a focused Move/resize frame saves its region here with the
+# default `dt-ocr-YYYYMMDD-HHMMSS.png` name, then closes the frame. Ctrl+S opens
+# a save dialog starting in this directory (name prefilled); Ctrl+C copies the
+# image. Pinning never writes a file. `%VAR%` expands; empty makes quick-save
+# report an error.
 [capture]
 dir = "%USERPROFILE%\\Pictures\\dt-ocr"
 
@@ -73,7 +76,8 @@ pin     = "ctrl+shift+alt+t" # toggle Pin (blue, click-through) / Move (cyan)
 capture = "ctrl+enter"   # copy the pixels under the frame; never changes mode
 frame_window = "ctrl+alt+w"  # drop the frame on the focused window (no capture)
 pin_shot = "ctrl+alt+p"  # quick pin (no file/clipboard); Ctrl+P = same for the frame
-# Focused Move frame: Esc closes; Ctrl+S saves+closes; Ctrl+C copies+closes.
+# Focused Move/resize frame: Esc closes; Ctrl+Shift+S saves+closes; Ctrl+S opens
+# the save dialog; Ctrl+C copies+closes; Pinned ignores all of them.
 move    = "ctrl+alt+m"   # Move mode (cyan); unlocks pin
 toggle  = "win+shift+o"  # show/hide the OCR layer (Win+O is reserved by Windows)
 quick_ocr = "ctrl+alt+o"        # draw a rect, OCR it, copy the text, then close the frame
