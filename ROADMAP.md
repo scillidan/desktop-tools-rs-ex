@@ -62,8 +62,9 @@ in `AGENTS.md`; this file is only what is left to build.
   undo/redo history, Ctrl+A and token-wise plain Ctrl+Left/Right; Esc closes.
 - Done: optional tray notification after a manual OCR result and a quick-OCR
   copy; silent by default, never on automatic refreshes.
-- Done: mask `Ctrl+C` copies the whole result and leaves the result view, with
-  the auto-OCR pause/Move behaviour above. The old selection-polish idea
+- Done: mask `Ctrl+C` copies the whole result and leaves the result view; with
+  auto OCR armed the session stays armed and waits for the next source change.
+  The old selection-polish idea
   (token-range anchor/head, double-click paragraph, copy flash) is dropped —
   click/drag copy and the outside editor cover the real use.
 
