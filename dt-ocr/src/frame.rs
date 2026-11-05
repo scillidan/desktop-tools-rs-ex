@@ -60,6 +60,9 @@ enum PendingResult {
 pub struct FrameState {
     /// Exclude the taskbar from movement and sizing bounds.
     pub work_area: bool,
+    /// Ctrl+A in progress: allow the move/size clamp to use the whole monitor
+    /// instead of the configured bounds.
+    full_fill: bool,
     /// The single source of truth: Move / Pinned / Input / Drag / Tune.
     pub mode: Mode,
     /// OCR worker running: the frame is click-through until it finishes
@@ -170,6 +173,20 @@ pub(crate) fn rect_of(r: RECT) -> Rect {
 /// Configured bounds of the monitor `hwnd` is on (fallback: primary).
 pub(crate) unsafe fn bounds(hwnd: HWND) -> Rect {
     monitor_bounds(hwnd)
+}
+
+/// Whole monitor rect (taskbar included), used by Ctrl+A and by the clamp
+/// while the fill is in progress.
+unsafe fn full_monitor(hwnd: HWND) -> Rect {
+    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !monitor.is_invalid() && GetMonitorInfoW(monitor, &mut mi).as_bool() {
+        return rect_of(mi.rcMonitor);
+    }
+    work_area()
 }
 
 /// Configured bounds of the monitor `hwnd` is on (fallback: primary).
@@ -337,6 +354,7 @@ pub unsafe fn create(
         GWLP_USERDATA,
         Box::into_raw(Box::new(FrameState {
             work_area: use_work_area,
+            full_fill: false,
             mode: Mode::Move,
             ocr_running: false,
             spec: String::new(),
@@ -769,6 +787,28 @@ pub unsafe fn place(hwnd: HWND, rect: Rect) {
     logline(&format!("frame placed: {rect:?}"));
 }
 
+/// Ctrl+A on a focused, non-pinned frame: grow it to the whole monitor it is on
+/// (taskbar included) without changing the current mode (Move stays Move, a
+/// resize substate stays in that substate).
+pub unsafe fn fill_monitor(hwnd: HWND) {
+    let bounds = full_monitor(hwnd);
+    state(hwnd).full_fill = true;
+    SetWindowPos(
+        hwnd,
+        Some(HWND_TOPMOST),
+        bounds.l,
+        bounds.t,
+        bounds.w(),
+        bounds.h(),
+        SWP_NOACTIVATE,
+    )
+    .ok();
+    state(hwnd).full_fill = false;
+    let _ = InvalidateRect(Some(hwnd), None, false);
+    let _ = UpdateWindow(hwnd);
+    logline(&format!("frame: monitor fill {bounds:?}"));
+}
+
 /// Arrow/hjkl step: 5 px with Ctrl held, else 1 px.
 unsafe fn key_step() -> i32 {
     if GetKeyState(VK_CONTROL.0 as i32) < 0 {
@@ -1050,7 +1090,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 wp.cy
             }
             .max(16);
-            let work = monitor_bounds(hwnd);
+            let work = if state(hwnd).full_fill {
+                full_monitor(hwnd)
+            } else {
+                monitor_bounds(hwnd)
+            };
             if (wp.flags & SWP_NOMOVE).0 == 0 {
                 wp.x = wp.x.clamp(work.l, (work.r - w).max(work.l));
                 wp.y = wp.y.clamp(work.t, (work.b - h).max(work.t));
@@ -1136,6 +1180,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 crate::frame_copy(hwnd);
                 return LRESULT(0);
             }
+            if ctrl && ch == 'a' && mode != Mode::Pinned {
+                fill_monitor(hwnd);
+                return LRESULT(0);
+            }
             if ctrl && mode != Mode::Pinned {
                 match ch {
                     's' if shift => {
@@ -1148,6 +1196,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     }
                     'p' => {
                         crate::frame_pin(hwnd);
+                        return LRESULT(0);
+                    }
+                    // Decoupled from the mode: works in Move and every resize
+                    // substate, like copy/save/pin.
+                    'o' => {
+                        crate::frame_open_with(hwnd);
+                        return LRESULT(0);
+                    }
+                    'f' => {
+                        if let Err(e) = crate::flameshot::launch(hwnd) {
+                            crate::logline(&format!("flameshot bridge failed: {e:#}"));
+                        }
                         return LRESULT(0);
                     }
                     _ => {}

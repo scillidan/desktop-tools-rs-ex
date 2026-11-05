@@ -135,7 +135,7 @@ fn parse_key(name: &str) -> Option<Key> {
         "end" => Key::End,
         "pageup" => Key::PageUp,
         "pagedown" => Key::PageDown,
-        "prtscn" | "printscreen" | "snapshot" => Key::Snapshot,
+        "prtscn" | "printscreen" | "print" | "snapshot" => Key::Snapshot,
         "pause" | "break" => Key::Pause,
         _ => return None,
     })

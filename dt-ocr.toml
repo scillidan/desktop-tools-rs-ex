@@ -65,6 +65,24 @@ border = "hatch"       # hatch | line | none
 hatch-color = "cyan"   # colour name or #RRGGBB; only used by border = "hatch"
 line-color = "black"   # colour name or #RRGGBB; only used by border = "line"
 
+[external]
+# Experimental and OFF by default (empty = disabled). Ctrl+F on a focused frame
+# hands its rect to Flameshot. Flameshot's limitation: a preset region within
+# 7 px of the screen origin pins at the top-left corner, so the bridge insets
+# edge-touching frames (up to 6 px lost on that edge). Set to "flameshot" (PATH)
+# or an absolute exe path to try it.
+flameshot = ""
+# Ctrl+O on a focused frame saves a temp PNG of the frame and opens it here
+# (PATH name or absolute exe). Empty = disabled. Example: "photocraft".
+editor = ""
+
+# Recording (Ctrl+Alt+R on a visible frame starts/stops; the frame hides while
+# recording so it never enters the video).
+[record]
+dir = "%USERPROFILE%\\Videos\\dt-ocr"   # %VAR% expanded, created on first use
+fps = 30                                # clamped to 5..60
+ffmpeg = "ffmpeg"                       # PATH name or absolute exe
+
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
 # NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows
 # defaults, but `pin` uses a three-modifier combo so plain Ctrl+T still reaches
@@ -77,11 +95,19 @@ capture = "ctrl+enter"   # copy the pixels under the frame; never changes mode
 frame_window = "ctrl+alt+w"  # drop the frame on the focused window (no capture)
 pin_shot = "ctrl+alt+p"  # quick pin (no file/clipboard); Ctrl+P = same for the frame
 # Focused Move/resize frame: Esc closes; Ctrl+Shift+S saves+closes; Ctrl+S opens
-# the save dialog; Ctrl+C copies+closes; Pinned ignores all of them.
+# the save dialog; Ctrl+C copies+closes; Ctrl+A fills the whole current monitor
+# (taskbar included) without changing the mode; Ctrl+O opens the capture in
+# [external] editor; Ctrl+F hands the rect to Flameshot (experimental). Pinned
+# ignores all of them.
 move    = "ctrl+alt+m"   # Move mode (cyan); unlocks pin
 toggle  = "win+shift+o"  # show/hide the OCR layer (Win+O is reserved by Windows)
 quick_ocr = "ctrl+alt+o"        # draw a rect, OCR it, copy the text, then close the frame
 auto_ocr  = "ctrl+shift+alt+o"  # draw or reuse the frame, OCR now, stay in automatic OCR
+record    = "ctrl+alt+r"        # start/stop recording the frame rect (frame hides)
+# Flameshot is not a global hotkey: with the frame focused, Ctrl+F hands the
+# frame rect to Flameshot's own UI (Print stays Flameshot's key; disabled until
+# [external] flameshot names the executable).
+# Ctrl+O on a focused frame opens the capture in [external] editor.
 
 # resize accepts: 1600x900 (exact), 1600 (width px), x900 (height px),
 # 40%x30% / 1/2x1/3 (independent width/height), 40% or 1/2 (both axes).

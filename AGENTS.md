@@ -61,8 +61,9 @@ window scaling. Same user, same machine, same conventions.
   the focus stealing looks like the app is spawning windows.
 - `RegisterHotKey` ids are 1-based indexes into `Action::ALL` (1 draw,
   2 resize, 3 pin, 4 capture, 5 frame_window, 6 pin_shot, 7 move, 8 toggle,
-  9 quick_ocr, 10 auto_ocr); `PostMessage WM_HOTKEY`
-  drives message-level behavior in harnesses.
+  9 quick_ocr, 10 auto_ocr, 11 record); `PostMessage WM_HOTKEY`
+  drives message-level behavior in harnesses. Flameshot is not a global
+  hotkey: it is the frame-local `Ctrl+F` handoff.
 - `InvalidateRect` alone does not repaint under hit-test traffic; the drag
   path calls `UpdateWindow` directly. `SystemParametersInfoForDpi` fails with
   E_INVALIDARG here — DPI comes from `GetDpiForWindow`; mask `size` is points
@@ -132,6 +133,37 @@ Mask `Ctrl+C` copies the whole result; with auto OCR armed the mask closes,
 the frame returns to Move and stays on screen, the session stays armed and the
 next source change triggers a fresh OCR after the settle delay. Drawing
 (`ctrl+alt+d`), `ctrl+alt+w` and moving/resizing never arm it.
+
+`flameshot` is an **experimental, frame-local handoff**, not a global hotkey:
+with the frame focused, `Ctrl+F` hides it, starts the Flameshot daemon (which
+hosts pinned screenshots), moves the cursor to the frame centre so Flameshot's
+overlay lands on the right monitor, runs `flameshot gui --region WxH+X+Y`, and
+leaves the frame hidden after Flameshot exits. It is disabled by default — the
+switch is `[external] flameshot = ""` (empty); set it to an exe name or path to
+enable — because of a Flameshot limitation: a preset region within 7 px of the
+monitor origin pins at the top-left corner, so the bridge must inset
+edge-touching frames (losing up to 6 px on that edge). The region is expressed
+relative to the frame's monitor. Flameshot keeps its own keys (Print included)
+and its own editor. Only one handoff can be open at a time.
+
+`Ctrl+O` on a focused frame (not Pinned) saves the frame to a temp PNG and
+launches `[external] editor` with it (e.g. `photocraft`); the frame is put away.
+It works from Move and every resize substate. Empty `editor` disables the key.
+Handoff PNGs go to `%TEMP%\dt-ocr`; files older than a day are deleted at
+startup and before each new handoff.
+
+`Ctrl+A` on a focused frame (not Pinned) grows it to the whole monitor
+(taskbar included, regardless of `[frame] work_area`) without changing the
+mode, so a resize substate stays in that substate.
+
+`record` (`ctrl+alt+r`, global) starts and stops a rect recording of the frame.
+Start needs a visible frame: it hides the frame (so the border never enters the
+video) and spawns ffmpeg with the `gdigrab` input at `[record] dir`,
+`[record] fps` (5–60) and `[record] ffmpeg`. Stop writes `q` to ffmpeg's stdin,
+waits up to 5 s, then kills; the frame comes back. Output is
+`dt-ocr-YYYYMMDD-HHMMSS.mp4`. A missing frame logs `record ignored: no frame`;
+exiting the daemon stops an active recording. Our own mask/pins are still
+recordable, so close them first.
 
 Only `draw`, `frame_window`, `quick_ocr`, `auto_ocr` and the no-frame
 `pin_shot` may run without a visible frame; resize/pin/capture/move/toggle log
@@ -219,6 +251,11 @@ an explorer restart silently removes the icon for the rest of the session.
   executable or language leaves the RapidOCR result intact.
 - Fonts: `Sarasa Term SC Nerd` (mask default, the WezTerm face) and
   `Microsoft YaHei` (outside-panel fallback).
+- Flameshot on `PATH` (or an absolute path in `[external] flameshot`) is only
+  needed for the experimental `Ctrl+F` handoff; `[external] editor` names the
+  app that `Ctrl+O` opens captures with. Both are empty/missing-safe.
+- `ffmpeg` on `PATH` (or `[record] ffmpeg`) for `Ctrl+Alt+R`; `gdigrab` is
+  built into the shared build.
 
 ## Resident host
 
@@ -389,7 +426,9 @@ first render with real contrast (plain `PrintWindow` returned a blank surface on
 real apps here); `ocr_actions_test.ps1` covers the no-frame guard, outside
 editor, arming/refreshing/pausing/switching off and quick OCR (22 checks),
 `mask_copy_test.ps1` covers non-auto copy-and-hide plus auto copy staying armed
-and refreshing on the next change (11 checks), and
+(10 of 11 mechanical checks; the next-change GUI case needs the test form to hold
+foreground); `flameshot_bridge_test.ps1` covers the frame hidden during the
+handoff, the region log, daemon start, frame stays exited and exit log (6 checks); and
 `editor_test.ps1` covers the persistent green result border, the mono editor
 font, exact preloaded text with no trailing heap garbage, the absence of a
 scrollbar and pause/resume (15 checks); `outside_lines_test.ps1` covers
@@ -444,6 +483,10 @@ covers image copy and quick-save from resize plus pinned copy (8 checks).
 | P0.7 | Mask `Ctrl+C` copies all and keeps auto armed in Move | the result view is out of the way but the next source change still refreshes; only `ctrl+alt+s` pauses a session |
 | P0.7 | Image keys are captured before the mode-specific key handling | Move and all resize substates behave the same; Pinned still accepts Ctrl+C while focused and keeps its pin |
 | P1.2 | `Ctrl+S` is a save-file dialog, `Ctrl+Shift+S` is the directory quick-save | one key to name a file, one key for the no-dialog path; the dialog starts where captures normally go |
+| P1.2 | `Ctrl+O` hands the capture to `[external] editor` via a temp PNG cleaned after a day | reuses a real image editor instead of growing one, and the temp folder cannot grow without bound |
+| P1.6 | Recording is `ffmpeg -f gdigrab` over the frame rect, frame hidden while recording | the simplest reliable rect recorder; the frame must not appear in its own video, and DDA stays a later upgrade for full-screen rate |
+| P1.5 | Flameshot handoff is experimental, frame-local `Ctrl+F`, disabled by an empty `[external] flameshot` | Flameshot's own Print/keys and behavior stay untouched, and its 7 px edge bug makes the handoff unreliable |
+| P1.5 | Region is monitor-relative and inset from the screen origin when within 7 px | Flameshot pins a preset selection to (0,0) if its x or y is under 7 px, and interprets `--region` relative to the monitor that hosts its overlay |
 | P0.6 | Releases and Scoop manifests use the `-ex` naming; the hash stays empty until the first release | assets and manifest autoupdate must agree; never call an unreleased package installable |
 
 Every handoff must rebuild LAST and check exe mtime > all src mtimes.

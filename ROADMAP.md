@@ -36,7 +36,9 @@ in `AGENTS.md`; this file is only what is left to build.
   closes the frame. `ocr_actions_test.ps1` passes 22/22.
 - **Result copy** mask `Ctrl+C` copies the whole OCR result; without auto OCR it
   closes the frame, with auto OCR it returns to Move and stays armed, waiting for
-  the next source change. `mask_copy_test.ps1` passes 11/11.
+  the next source change. `mask_copy_test.ps1` copy/hide and stays-armed checks
+  pass; the next-change GUI check needs physical verification because the test
+  form can lose foreground.
 - **Image keys** from Move or any resize substate: `Ctrl+C` copies the frame
   image and closes, `Ctrl+Shift+S` quick-saves to `[capture] dir`, `Ctrl+S` opens
   a save-file dialog there, `Ctrl+P` pins. On a focused Pinned frame only
@@ -99,43 +101,54 @@ in `AGENTS.md`; this file is only what is left to build.
   window, and the show-desktop case captures something sensible instead of
   failing.
 
-### P1.5 Flameshot bridge (separate plan)
-- Goal: any visible frame hands its rect to Flameshot's own region UI; dt-ocr
-  does not grow a second screenshot editor (no colour picker, arrows, blur,
-  OCR-of-screenshot, etc.).
-- Proposed key: `Ctrl+Alt+F` on a frame (free today). Candidate command:
-  `flameshot gui --region WxH+X+Y` (verify the exact CLI at implementation
-  time; flameshot accepts a region/geometry argument in current releases).
-- Flow: remember rect → hide the frame → launch Flameshot with that region →
-  restore the frame when Flameshot exits. Missing `flameshot.exe` logs and
-  leaves the frame alone. Config: `[external] flameshot = "flameshot"` (PATH or
-  absolute).
-- Acceptance: frame over a window + key opens Flameshot preselected to exactly
-  that rect; no dt-ocr image/file is written; a missing executable is a visible
-  warning, not a crash.
-- Open: multi-monitor negative coordinates, and whether Flameshot should keep
-  running after the frame is restored.
+### P1.5 Flameshot bridge
+- Implemented as **experimental, disabled by default** (empty `[external]
+  flameshot`; set it to the exe to enable): with the frame focused, `Ctrl+F`
+  hides it, starts the Flameshot daemon, moves the cursor to the frame centre,
+  launches `flameshot gui --region WxH+X+Y`, and leaves the frame hidden when
+  Flameshot exits. Flameshot's known limitation: a preset region within 7 px of
+  the monitor origin pins at the top-left corner, so the bridge insets
+  edge-touching frames (up to 6 px lost on that edge). dt-ocr writes no file and
+  touches no clipboard on this path. One handoff at a time.
+  `flameshot_bridge_test.ps1` passes 8/8 (disabled-by-default gate, then hide,
+  region log, daemon, frame stays exited, exit log).
+- Implemented: `Ctrl+O` on a focused frame (not Pinned, any resize substate)
+  saves a temp PNG and launches `[external] editor` with it; empty disables.
+  Temp files live in `%TEMP%\dt-ocr` and files older than a day are removed at
+  startup and before each handoff.
+- Implemented: `Ctrl+A` on a focused frame (not Pinned) fills the whole current
+  monitor including the taskbar, without changing the mode.
+  `frame_fill_open_test.ps1` passes 8/8 (monitor fill keeps mode, Ctrl+O from a
+  resize substate launches the editor, temp PNG arg, logs).
+- Remaining: physical verification on a multi-monitor negative-coordinate
+  region, the pin location when the Flameshot daemon was already running before
+  the bridge, and whether `Print` conflicts with an existing Flameshot-hotkey
+  configuration (dt-ocr logs a registration warning if the key is taken).
 
 ### P1.6 Recording bridge (separate plan)
-- Goal: any visible frame's rect starts/stops the P1.3 recorder; the frame stays
-  as the visual guide while recording.
-- Proposed key: `Ctrl+Alt+R` on a frame (start/stop). Output goes to
-  `[record] dir` with the same timestamped naming as captures; config carries
-  fps/quality once P1.3 exists.
-- Flow: start → frame stays visible but click-through? (decide) → second key
-  stops → writes the file and logs the path. No frame = ignore.
-- Depends on P1.3 (DDA + ffmpeg); do not build a second encoder here.
+- Done: `record` (`ctrl+alt+r`, global, id 11) starts/stops a recording of the
+  visible frame's rect. Start hides the frame so the border is never in the
+  video, then spawns `ffmpeg -f gdigrab -framerate <fps> -offset_x/-offset_y
+  -video_size <w>x<h> -i desktop -c:v libx264 -preset veryfast -pix_fmt yuv420p`
+  with CREATE_NO_WINDOW and a piped stdin. Stop writes `q`, waits up to 5 s,
+  kills if needed, and re-shows the frame; daemon exit also stops an active
+  session. Output is `[record] dir`/`dt-ocr-YYYYMMDD-HHMMSS.mp4`.
+  `record_test.ps1` passes 8/8 (start log/rect, frame hidden, stop log, mp4
+  written with content, frame restored); ffprobe confirmed 500x360 / 30 fps for
+  a 500x360 frame.
+- Remaining: full-screen desktop recording at a high frame rate (DDA upgrade,
+  see P1.3), audio, cursor capture, and excluding our own mask/pins.
 - Acceptance: start/stop from a frame produces a file whose content matches the
   framed rect; the frame never appears in the recording.
-- Open: whether the frame should be hidden during capture (like image copy) or
-  kept as a guide; audio; cursor.
 
 ### P1.3 Recording (wcap model)
 - The maintainer's own experience: `wcap.exe` is unreliable — it mostly managed
   small windows and video-ish content, so a wrapper is not the goal. Plan on
   own capture (Desktop Duplication API → ffmpeg) and treat `wcap.exe` as a
-  fallback only. Selecting the full screen in P1.2 should later become desktop
-  recording with the same rect.
+  fallback only.
+- Status: the rect recorder shipped in P1.6 with `ffmpeg -f gdigrab` (simple,
+  reliable for a rect). DDA stays the upgrade path for full-screen/high-fps
+  capture; `shortcut:` is recorded in `dt-ocr/src/record.rs`.
 - Shared with P1.2: quality, fps, output config; locate `ffmpeg.exe` (Scoop).
 - Decide the DDA details at start with context7 + reading wcap's source.
 

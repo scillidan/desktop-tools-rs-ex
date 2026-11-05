@@ -221,8 +221,17 @@ fn file_name(st: &SYSTEMTIME) -> String {
     )
 }
 
+/// `dt-ocr-YYYYMMDD-HHMMSS.mp4` in local time (recording output).
+pub(crate) fn record_name() -> String {
+    let st = unsafe { GetLocalTime() };
+    format!(
+        "dt-ocr-{:04}{:02}{:02}-{:02}{:02}{:02}.mp4",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+    )
+}
+
 /// `%USERPROFILE%\Pictures` style expansion; unknown names stay literal.
-fn expand_env(s: &str) -> String {
+pub(crate) fn expand_env(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find('%') {

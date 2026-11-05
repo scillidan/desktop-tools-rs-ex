@@ -58,6 +58,18 @@ pub struct Config {
     pub pin_line_color: u32,
     /// `hatch` colour, 0xRRGGBB (default cyan).
     pub pin_hatch_color: u32,
+    /// External screenshot tool executable for the experimental frame bridge
+    /// (PATH name or absolute path). Empty (the default) disables it.
+    pub flameshot: String,
+    /// Image editor to open a frame capture with (Ctrl+O), PATH name or
+    /// absolute path. Empty disables the action.
+    pub external_editor: String,
+    /// Recording output folder (`%VAR%` expanded).
+    pub record_dir: String,
+    /// Recording frame rate (clamped to 5..=60).
+    pub record_fps: u32,
+    /// ffmpeg executable used for recording (PATH name or absolute).
+    pub record_ffmpeg: String,
     pub bindings: Bindings,
 }
 
@@ -120,6 +132,7 @@ pub struct Bindings {
     pub toggle: Combo,
     pub quick_ocr: Combo,
     pub auto_ocr: Combo,
+    pub record: Combo,
 }
 
 /// Frame actions a binding can trigger (hotkey ids index into this order).
@@ -135,10 +148,11 @@ pub enum Action {
     Toggle,
     QuickOcr,
     AutoOcr,
+    Record,
 }
 
 impl Action {
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 11] = [
         Action::Draw,
         Action::Resize,
         Action::Pin,
@@ -149,6 +163,7 @@ impl Action {
         Action::Toggle,
         Action::QuickOcr,
         Action::AutoOcr,
+        Action::Record,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -162,6 +177,7 @@ impl Action {
             Action::Toggle => "toggle",
             Action::QuickOcr => "quick_ocr",
             Action::AutoOcr => "auto_ocr",
+            Action::Record => "record",
         }
     }
     fn default_combo(self) -> Combo {
@@ -180,6 +196,7 @@ impl Action {
             Action::Toggle => "win+shift+o".parse().unwrap(),
             Action::QuickOcr => "ctrl+alt+o".parse().unwrap(),
             Action::AutoOcr => "ctrl+shift+alt+o".parse().unwrap(),
+            Action::Record => "ctrl+alt+r".parse().unwrap(),
         }
     }
     pub(crate) fn get(self, b: &Bindings) -> Combo {
@@ -194,6 +211,7 @@ impl Action {
             Action::Toggle => b.toggle,
             Action::QuickOcr => b.quick_ocr,
             Action::AutoOcr => b.auto_ocr,
+            Action::Record => b.record,
         }
     }
     pub(crate) fn set(self, b: &mut Bindings, c: Combo) {
@@ -208,6 +226,7 @@ impl Action {
             Action::Toggle => b.toggle = c,
             Action::QuickOcr => b.quick_ocr = c,
             Action::AutoOcr => b.auto_ocr = c,
+            Action::Record => b.record = c,
         }
     }
 }
@@ -225,6 +244,7 @@ impl Default for Bindings {
             toggle: Combo::default(),
             quick_ocr: Combo::default(),
             auto_ocr: Combo::default(),
+            record: Combo::default(),
         };
         for a in Action::ALL {
             a.set(&mut b, a.default_combo());
@@ -254,6 +274,11 @@ impl Default for Config {
             pin_border: PinBorder::Hatch,
             pin_line_color: 0,
             pin_hatch_color: 0x00ffff,
+            flameshot: String::new(),
+            external_editor: String::new(),
+            record_dir: "%USERPROFILE%\\Videos\\dt-ocr".to_string(),
+            record_fps: 30,
+            record_ffmpeg: "ffmpeg".to_string(),
             bindings: Bindings::default(),
         }
     }
@@ -438,6 +463,44 @@ pub fn parse(text: &str) -> Result<Config> {
             None => eprintln!("warn: [notify] must be a table; using defaults"),
         }
     }
+    if let Some(external) = table.get("external") {
+        match external.as_table() {
+            Some(t) => {
+                if let Some(v) = t.get("flameshot") {
+                    match v.as_str() {
+                        Some(s) => cfg.flameshot = s.to_string(),
+                        None => eprintln!("warn: external.flameshot must be a string; disabled"),
+                    }
+                }
+                if let Some(v) = t.get("editor") {
+                    match v.as_str() {
+                        Some(s) => cfg.external_editor = s.to_string(),
+                        None => eprintln!("warn: external.editor must be a string; disabled"),
+                    }
+                }
+            }
+            None => eprintln!("warn: [external] must be a table; using defaults"),
+        }
+    }
+    if let Some(record) = table.get("record") {
+        match record.as_table() {
+            Some(t) => {
+                if let Some(v) = t.get("dir").and_then(|v| v.as_str()) {
+                    cfg.record_dir = v.to_string();
+                }
+                if let Some(v) = t.get("fps") {
+                    match v.as_integer() {
+                        Some(n) => cfg.record_fps = n.clamp(5, 60) as u32,
+                        None => eprintln!("warn: record.fps must be an integer; using 30"),
+                    }
+                }
+                if let Some(v) = t.get("ffmpeg").and_then(|v| v.as_str()) {
+                    cfg.record_ffmpeg = v.to_string();
+                }
+            }
+            None => eprintln!("warn: [record] must be a table; using defaults"),
+        }
+    }
     if let Some(pin) = table.get("pin") {
         match pin.as_table() {
             Some(t) => {
@@ -555,6 +618,11 @@ mod tests {
                 pin_border: PinBorder::Hatch,
                 pin_line_color: 0,
                 pin_hatch_color: 0x00ffff,
+                flameshot: String::new(),
+                external_editor: String::new(),
+                record_dir: "%USERPROFILE%\\Videos\\dt-ocr".to_string(),
+                record_fps: 30,
+                record_ffmpeg: "ffmpeg".to_string(),
                 bindings: Bindings::default(),
             }
         );
@@ -618,6 +686,38 @@ mod tests {
     fn invalid_toml_is_an_error() {
         assert!(parse("[[[").is_err());
         assert!(parse("42").is_err());
+    }
+
+    #[test]
+    fn flameshot_bridge_config_parses() {
+        // Disabled by default: the empty path is the switch.
+        assert_eq!(parse("").unwrap().flameshot, "");
+        assert_eq!(parse("").unwrap().external_editor, "");
+        assert_eq!(
+            parse("[external]\nflameshot = \"C:\\\\Tools\\\\flameshot.exe\"\n")
+                .unwrap()
+                .flameshot,
+            "C:\\Tools\\flameshot.exe"
+        );
+        let cfg = parse("[external]\neditor = \"photocraft\"\n").unwrap();
+        assert_eq!(cfg.external_editor, "photocraft");
+    }
+
+    #[test]
+    fn record_config_parses_and_clamps_fps() {
+        let cfg = parse("").unwrap();
+        assert_eq!(cfg.record_dir, "%USERPROFILE%\\Videos\\dt-ocr");
+        assert_eq!(cfg.record_fps, 30);
+        assert_eq!(cfg.record_ffmpeg, "ffmpeg");
+        let cfg = parse("[record]\ndir = \"E:\\\\clips\"\nfps = 200\nffmpeg = \"C:\\\\ff.exe\"\n")
+            .unwrap();
+        assert_eq!(cfg.record_dir, "E:\\clips");
+        assert_eq!(cfg.record_fps, 60);
+        assert_eq!(cfg.record_ffmpeg, "C:\\ff.exe");
+        assert_eq!(
+            parse("").unwrap().bindings.record,
+            "ctrl+alt+r".parse::<Combo>().unwrap()
+        );
     }
 
     #[test]
