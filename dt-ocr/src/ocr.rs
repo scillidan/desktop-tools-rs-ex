@@ -13,7 +13,7 @@ mod external;
 pub(crate) use auto::finished;
 pub use auto::{
     auto_enabled, auto_paused, auto_tick, disable_auto, enable_auto, pause_auto, resume_auto,
-    set_auto,
+    retarget_auto, set_auto,
 };
 
 use crate::config::OcrBackend;

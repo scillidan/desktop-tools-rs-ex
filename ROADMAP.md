@@ -127,17 +127,33 @@ in `AGENTS.md`; this file is only what is left to build.
 
 ### P1.6 Recording bridge (separate plan)
 - Done: `record` (`ctrl+alt+r`, global, id 11) starts/stops a recording of the
-  visible frame's rect. Start hides the frame so the border is never in the
-  video, then spawns `ffmpeg -f gdigrab -framerate <fps> -offset_x/-offset_y
-  -video_size <w>x<h> -i desktop -c:v libx264 -preset veryfast -pix_fmt yuv420p`
-  with CREATE_NO_WINDOW and a piped stdin. Stop writes `q`, waits up to 5 s,
-  kills if needed, and re-shows the frame; daemon exit also stops an active
-  session. Output is `[record] dir`/`dt-ocr-YYYYMMDD-HHMMSS.mp4`.
-  `record_test.ps1` passes 8/8 (start log/rect, frame hidden, stop log, mp4
-  written with content, frame restored); ffprobe confirmed 500x360 / 30 fps for
-  a 500x360 frame.
+  visible frame's rect. The frame stays on screen with a red REC border while
+  recording; the captured rect is inset 2 px so the border is never in the
+  video, and stopping clears the border and gives the frame keyboard focus back.
+  Start spawns `ffmpeg -f gdigrab -framerate <fps> -offset_x/-offset_y
+  -video_size <w>x<h> -i desktop -c:v libx264 -preset veryfast -crf <crf> -g
+  <fps*2> -pix_fmt yuv420p -movflags +frag_keyframe+empty_moov
+  -thread_queue_size 1024 -max_muxing_queue_size 1024` with CREATE_NO_WINDOW and
+  a piped stdin. Stop writes `q`, waits up to 5 s, kills if needed; daemon exit
+  also stops an active session. Output is `[record] dir` + the `[record] name`
+  template (`{date}`, `{time}`, `{datetime}`; default `dt-ocr-{date}-{time}`).
+- Done: desktop audio on by default. ffmpeg here has no `wasapi` input, so
+  `audio.rs` captures the default playback device through WASAPI loopback
+  (16-bit PCM WAV, silence padded when nothing plays) and ffmpeg muxes it with a
+  single video stream copy at stop; a dead capture only warns.
+- Done: safeguards — even-sized rect (yuv420p), `min_free_mb` checked before
+  start and every 3 s while recording, `max_minutes` cap (default 60, 0 = off),
+  fragmented MP4 so a kill leaves a playable file, single-session flag,
+  `crf 16..34`, fps 5..60, and stop-on-exit.
+- Verification: `record_test.ps1` 12/12 (start/stop logs, frame hidden and
+  restored, audio muxed, mp4 content, audio stream present, measured
+  `mean_volume -29.6 dB` from a system sound played during the take, low-disk
+  refusal + frame restore). `audio.rs` has header/format-conversion unit tests,
+  `record.rs` covers even sizing and both auto-stop rules. ffprobe on a take:
+  500x360 h264 + aac.
 - Remaining: full-screen desktop recording at a high frame rate (DDA upgrade,
-  see P1.3), audio, cursor capture, and excluding our own mask/pins.
+  see P1.3), cursor capture, per-application audio, and excluding our own
+  mask/pins.
 - Acceptance: start/stop from a frame produces a file whose content matches the
   framed rect; the frame never appears in the recording.
 
@@ -153,11 +169,16 @@ in `AGENTS.md`; this file is only what is left to build.
 - Decide the DDA details at start with context7 + reading wcap's source.
 
 ### P1.4 Window scaling (Magpie model)
-- Research spike first (Magpie = D3D11 capture + shaders). The OCR path already
-  taught us GDI upscaling (`[ocr] scale`, halftone), but that is still-image
-  resampling — live window scaling needs a capture-and-present pipeline, so it
-  does not shorten this phase. v1 may be a simple integer-ratio fullscreen
-  stretch; lecture/presentation is the target. Decide the approach at start.
+- Done (v1): `scale` (`ctrl+alt+z`, global, id 12) zooms the focused window into
+  a fullscreen topmost window on its monitor through a DWM thumbnail
+  (`DwmRegisterThumbnail`), aspect-preserved letterbox, source client area only.
+  Esc / right-click / the hotkey again closes it. `scale_test.ps1` passes 6/6
+  and `scale::fit` has unit tests for letterbox math. This is the "simple
+  fullscreen stretch" v1; the zoom window takes focus, so the source cannot be
+  typed into while zoomed.
+- Remaining: sharpened upscaling (D3D11 capture + shader, Magpie model), input
+  passthrough so the zoomed app stays usable, per-monitor/integer-ratio modes,
+  and moving the module into the planned `dt-scale` crate when that lands.
 
 ## P2 — Consolidation
 - Extract `dt-common` back into the keytools-rs/kit plan (kit is the shared

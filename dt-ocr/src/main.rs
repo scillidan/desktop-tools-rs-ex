@@ -6,6 +6,7 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod audio;
 mod capture;
 mod config;
 mod desktops;
@@ -21,6 +22,7 @@ mod ocr;
 mod overlay;
 mod pin;
 mod record;
+mod scale;
 mod text;
 mod tray;
 
@@ -101,7 +103,7 @@ fn run() -> Result<()> {
     tray::set_notify(cfg.notify_enabled);
     flameshot::set_path(cfg.flameshot.clone());
     set_external_editor(&cfg.external_editor);
-    set_record_cfg(&cfg.record_dir, cfg.record_fps, &cfg.record_ffmpeg);
+    set_record_cfg(&cfg);
     cleanup_temp_captures();
     set_pin_style(cfg.pin_border, cfg.pin_line_color, cfg.pin_hatch_color);
     logline(&format!(
@@ -191,11 +193,7 @@ fn run() -> Result<()> {
                         tray::set_notify(new_cfg.notify_enabled);
                         flameshot::set_path(new_cfg.flameshot.clone());
                         set_external_editor(&new_cfg.external_editor);
-                        set_record_cfg(
-                            &new_cfg.record_dir,
-                            new_cfg.record_fps,
-                            &new_cfg.record_ffmpeg,
-                        );
+                        set_record_cfg(&new_cfg);
                         set_pin_style(
                             new_cfg.pin_border,
                             new_cfg.pin_line_color,
@@ -259,6 +257,15 @@ fn reload(cfg_path: &std::path::Path) -> Result<config::Config> {
 }
 
 fn dispatch(action: Action, frame: HWND) {
+    // A recording owns the screen: our own overlays (mask, dim, a moved frame)
+    // must not appear in the take, so only Record may run until it stops.
+    if crate::record::is_recording() && !matches!(action, Action::Record) {
+        logline(&format!(
+            "{} ignored: recording (stop it first)",
+            action.name()
+        ));
+        return;
+    }
     let visible = unsafe { frame::visible_rect(frame).is_some() };
     // Only the commands that create or place a frame may run without one.
     if !visible
@@ -344,23 +351,42 @@ fn dispatch(action: Action, frame: HWND) {
                 frame::to_move(frame);
             }
             Action::Toggle => mask::toggle(),
+            // Ctrl+Alt+Z: fullscreen DWM-thumbnail zoom of the focused window.
+            Action::Scale => scale::toggle(),
             // Ctrl+Alt+R: record the frame rect, or stop the running session.
-            // The frame is hidden while recording so it never enters the video.
+            // The frame stays on screen with a red REC border, but the capture
+            // rect is inset past that border so the red edge never lands in the
+            // video.
             Action::Record => {
                 if record::is_recording() {
                     if let Err(e) = record::stop() {
                         logline(&format!("record stop failed: {e:#}"));
                     }
+                    frame::set_recording(frame, false);
                     frame::ensure_visible(frame);
+                    frame::focus(frame);
                 } else {
                     match frame::visible_rect(frame) {
                         Some(rect) => {
-                            frame::hide(frame);
-                            let (dir, fps, ffmpeg) = record_cfg();
-                            if let Err(e) = record::start(frame::rect_of(rect), &dir, fps, &ffmpeg)
-                            {
-                                logline(&format!("record failed: {e:#}"));
-                                frame::ensure_visible(frame);
+                            let inner = dt_common::layout::inset(frame::rect_of(rect), 2);
+                            let settings = record_cfg();
+                            match record::start(inner, &settings) {
+                                Ok(()) => {
+                                    // Our own overlays must not end up in the
+                                    // take: drop the OCR result and keep OCR
+                                    // from popping up again while it runs.
+                                    mask::dismiss();
+                                    logline(
+                                        "record: dismissed OCR result; OCR paused while recording",
+                                    );
+                                    frame::ensure_visible(frame);
+                                    frame::set_recording(frame, true);
+                                }
+                                Err(e) => {
+                                    logline(&format!("record failed: {e:#}"));
+                                    frame::set_recording(frame, false);
+                                    frame::ensure_visible(frame);
+                                }
                             }
                         }
                         None => logline("record ignored: no frame"),
@@ -386,12 +412,14 @@ fn dispatch(action: Action, frame: HWND) {
             // Frame the window the user is looking at: the frame becomes the
             // region for OCR/capture without a manual drag.
             Action::FrameWindow => {
-                ocr::disable_auto();
                 mask::dismiss();
                 match capture::window_target() {
                     Ok(rect) => {
                         frame::place(frame, frame::rect_of(rect));
                         frame::to_move(frame);
+                        // Re-targeting keeps an armed auto session armed; it
+                        // only restarts the comparison against the new region.
+                        ocr::retarget_auto(frame);
                         logline(&format!("frame: window at {rect:?}"));
                     }
                     Err(e) => logline(&format!("frame window failed: {e:#}")),
@@ -610,16 +638,33 @@ fn external_editor() -> String {
         .unwrap_or_else(|e| e.into_inner().clone())
 }
 
-static RECORD_CFG: std::sync::Mutex<(String, u32, String)> =
-    std::sync::Mutex::new((String::new(), 30, String::new()));
+static RECORD_CFG: std::sync::Mutex<record::Settings> = std::sync::Mutex::new(record::Settings {
+    dir: String::new(),
+    name: String::new(),
+    fps: 30,
+    ffmpeg: String::new(),
+    audio: true,
+    crf: 20,
+    max_minutes: 60,
+    min_free_mb: 500,
+});
 
-fn set_record_cfg(dir: &str, fps: u32, ffmpeg: &str) {
+fn set_record_cfg(cfg: &config::Config) {
     if let Ok(mut c) = RECORD_CFG.lock() {
-        *c = (dir.to_string(), fps, ffmpeg.to_string());
+        *c = record::Settings {
+            dir: cfg.record_dir.clone(),
+            name: cfg.record_name.clone(),
+            fps: cfg.record_fps,
+            ffmpeg: cfg.record_ffmpeg.clone(),
+            audio: cfg.record_audio,
+            crf: cfg.record_crf,
+            max_minutes: cfg.record_max_minutes,
+            min_free_mb: cfg.record_min_free_mb,
+        };
     }
 }
 
-fn record_cfg() -> (String, u32, String) {
+fn record_cfg() -> record::Settings {
     RECORD_CFG
         .lock()
         .map(|c| c.clone())

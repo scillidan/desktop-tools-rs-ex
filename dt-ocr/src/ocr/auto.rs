@@ -107,6 +107,20 @@ pub fn disable_auto() {
     s.sample_failed = false;
 }
 
+/// The frame moved to another window (`ctrl+alt+w`). An armed session stays
+/// armed, but comparison starts over against the new region; `busy` is kept so
+/// an in-flight run still owns the result.
+pub fn retarget_auto(frame: HWND) {
+    let mut s = state();
+    if !s.armed {
+        return;
+    }
+    s.frame = frame.0 as isize;
+    s.baseline.clear();
+    s.changed_at = None;
+    s.sample_failed = false;
+}
+
 pub(super) fn before_start(frame: HWND, snapshot: &Snapshot) {
     let baseline = unsafe { crate::frame::visible_rect(frame) }
         .and_then(|rect| unsafe { sample(rect).ok() })
@@ -156,6 +170,10 @@ unsafe fn sample(rect: RECT) -> Result<Vec<u8>> {
 /// first observed frame only establishes the comparison baseline.
 pub unsafe fn auto_tick(frame: HWND) {
     if !auto_enabled() || auto_paused() || frame.0.is_null() {
+        return;
+    }
+    // Recording must stay free of our own mask overlays.
+    if crate::record::is_recording() {
         return;
     }
     let Some(rect) = crate::frame::visible_rect(frame) else {
@@ -349,6 +367,24 @@ mod tests {
         assert!(auto_enabled());
         assert!(!auto_paused());
         disable_auto();
+    }
+
+    #[test]
+    fn retarget_keeps_armed_and_clears_the_baseline() {
+        disable_auto();
+        enable_auto(HWND(std::ptr::null_mut()));
+        let other = HWND(std::ptr::without_provenance_mut::<core::ffi::c_void>(1));
+        retarget_auto(other);
+        assert!(auto_enabled());
+        assert!(!auto_paused());
+        assert_eq!(state().frame, 1);
+        assert!(state().baseline.is_empty());
+        disable_auto();
+        // A retarget with no armed session stays disarmed.
+        retarget_auto(HWND(std::ptr::without_provenance_mut::<core::ffi::c_void>(
+            2,
+        )));
+        assert!(!auto_enabled());
     }
 
     #[test]

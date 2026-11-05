@@ -61,7 +61,7 @@ window scaling. Same user, same machine, same conventions.
   the focus stealing looks like the app is spawning windows.
 - `RegisterHotKey` ids are 1-based indexes into `Action::ALL` (1 draw,
   2 resize, 3 pin, 4 capture, 5 frame_window, 6 pin_shot, 7 move, 8 toggle,
-  9 quick_ocr, 10 auto_ocr, 11 record); `PostMessage WM_HOTKEY`
+  9 quick_ocr, 10 auto_ocr, 11 record, 12 scale); `PostMessage WM_HOTKEY`
   drives message-level behavior in harnesses. Flameshot is not a global
   hotkey: it is the frame-local `Ctrl+F` handoff.
 - `InvalidateRect` alone does not repaint under hit-test traffic; the drag
@@ -103,8 +103,9 @@ RegisterHotKey; `ocr.rs` engine routing + Windows OCR fallback; `ocr/auto.rs`
 persistent RapidOCR worker + Tesseract TSV; `scripts/rapidocr_worker.py` embedded
 uv/ONNX worker; `mask.rs` layered mask, box/box+mask/box+outside rendering, selection, toggle; `text.rs`
 `join_words`/CJK rules; `desktops.rs` one frame per virtual desktop; `tray.rs`
-Shell_NotifyIconW; `menu.rs` native tray popup; `icon.rs`/`build.rs` procedural
-icon.
+Shell_NotifyIconW; `menu.rs` native tray popup; `record.rs` ffmpeg gdigrab rect
+recorder; `flameshot.rs` experimental Flameshot handoff; `scale.rs` DWM-thumbnail
+window zoom; `icon.rs`/`build.rs` procedural icon.
 
 ## Capture sinks
 
@@ -132,7 +133,11 @@ turns it off and closes the frame; hiding the frame any other way also stops it.
 Mask `Ctrl+C` copies the whole result; with auto OCR armed the mask closes,
 the frame returns to Move and stays on screen, the session stays armed and the
 next source change triggers a fresh OCR after the settle delay. Drawing
-(`ctrl+alt+d`), `ctrl+alt+w` and moving/resizing never arm it.
+(`ctrl+alt+d`) and moving/resizing never arm it; re-targeting with
+`ctrl+alt+w` keeps an armed session armed and only restarts the comparison
+against the new region (`ocr::retarget_auto`). Note that a fully occluded source
+window that stops painting (a WinForms form behind a topmost frame) yields an
+unchanged sample, so its change is not detected; real apps repaint.
 
 `flameshot` is an **experimental, frame-local handoff**, not a global hotkey:
 with the frame focused, `Ctrl+F` hides it, starts the Flameshot daemon (which
@@ -157,17 +162,42 @@ startup and before each new handoff.
 mode, so a resize substate stays in that substate.
 
 `record` (`ctrl+alt+r`, global) starts and stops a rect recording of the frame.
-Start needs a visible frame: it hides the frame (so the border never enters the
-video) and spawns ffmpeg with the `gdigrab` input at `[record] dir`,
-`[record] fps` (5–60) and `[record] ffmpeg`. Stop writes `q` to ffmpeg's stdin,
-waits up to 5 s, then kills; the frame comes back. Output is
-`dt-ocr-YYYYMMDD-HHMMSS.mp4`. A missing frame logs `record ignored: no frame`;
-exiting the daemon stops an active recording. Our own mask/pins are still
-recordable, so close them first.
+Start needs a visible frame: it clamps the rect to even dimensions (yuv420p
+cannot encode odd ones), refuses to start below `[record] min_free_mb`, turns the
+frame's border red (REC) and keeps it on screen as the recording indicator, makes
+the frame click-through so the app being recorded still takes clicks, and
+spawns ffmpeg with the `gdigrab` input at `[record] dir`, the
+`[record] name` template (`{date}`, `{time}`, `{datetime}`; separators and
+reserved characters become `_`), `[record] fps` (5–60), `[record] crf` (16–34),
+large input/mux queues, and `+frag_keyframe+empty_moov` so a killed session is
+still playable. The captured rect is inset 2 px inside that border, so the red
+edge never lands in the video, and a recording owns the screen: starting it drops
+any OCR mask, every other action logs `<action> ignored: recording (stop it
+first)`, and automatic OCR is skipped, so no overlay can appear in the take. Desktop audio is captured separately with WASAPI
+loopback of the default playback device (`audio = true` by default) into a WAV
+and muxed into the mp4 with one stream copy at stop; silence is padded while
+nothing plays so the track stays aligned with the video, and a missing device
+only warns. Stop writes `q` to ffmpeg's stdin, waits up to 5 s, then kills,
+clears the red border, re-shows the frame and gives it keyboard focus again. A
+watchdog auto-stops at `[record] max_minutes` (default 60, 0 = no cap) or when
+free space drops below `min_free_mb`. Output is
+`dt-ocr-YYYYMMDD-HHMMSS.mp4` unless the name template says otherwise. A missing
+frame logs `record ignored: no frame`; exiting the daemon stops an active
+recording. Our own mask/pins are still recordable, so close them first.
 
-Only `draw`, `frame_window`, `quick_ocr`, `auto_ocr` and the no-frame
-`pin_shot` may run without a visible frame; resize/pin/capture/move/toggle log
-an ignore instead of resurrecting a hidden frame.
+`scale` (`ctrl+alt+z`, global) zooms the window the user is looking at — the
+same target chain as `frame_window` (foreground → under the cursor), but the
+HWND itself. It opens a borderless topmost window over that window's monitor and
+presents the source through a DWM thumbnail (`DwmRegisterThumbnail`), letterboxed
+with the aspect preserved, source client area only. Esc, a right-click, the same
+hotkey again or closing the window ends the zoom. `shortcut:` the thumbnail is
+hardware-composited and live but not sharpened; Magpie-style D3D11 upscaling is
+the later upgrade. The zoom window takes focus, so the source app cannot be
+typed into while zoomed.
+
+Only `draw`, `frame_window`, `quick_ocr`, `auto_ocr`, the no-frame `pin_shot`,
+`record` and `scale` may run without a visible frame; resize/pin/capture/move/
+toggle log an ignore instead of resurrecting a hidden frame.
 
 `frame_window` (ctrl+alt+w) puts the frame on the window the user is looking at
 (focused window → topmost real window under the cursor → the monitor) and goes
@@ -401,8 +431,10 @@ matches several horizontally separated primary fragments (for example `87` and
 `ScanTailor Advanced`), the merged result emits that row once instead of keeping
 the fragments as duplicate lines. On the mixed sample,
 RapidOCR takes ~6.6 s including its first model start and ~0.8–1.1 s afterwards;
-Tesseract takes ~0.6–1.0 s. `mask_test.ps1` passes all 25 checks including exact
-mixed Latin+CJK selection, and `engine_routing_test.ps1` passes 8 checks.
+Tesseract takes ~0.6–1.0 s. `mask_test.ps1` passes 25/25 including exact mixed
+Latin+CJK selection — it forces `[mask] mode = "box+mask"` (the black backing only
+exists there) and places a frame first, because frames start hidden;
+`engine_routing_test.ps1` passes 8/8 with the same placement requirement.
 
 P0.5 status: automatic OCR is OFF by default. `auto_ocr` (`ctrl+shift+alt+o`) is
 the only way to arm it: with no frame it draws one, with a visible frame (any
@@ -484,7 +516,9 @@ covers image copy and quick-save from resize plus pinned copy (8 checks).
 | P0.7 | Image keys are captured before the mode-specific key handling | Move and all resize substates behave the same; Pinned still accepts Ctrl+C while focused and keeps its pin |
 | P1.2 | `Ctrl+S` is a save-file dialog, `Ctrl+Shift+S` is the directory quick-save | one key to name a file, one key for the no-dialog path; the dialog starts where captures normally go |
 | P1.2 | `Ctrl+O` hands the capture to `[external] editor` via a temp PNG cleaned after a day | reuses a real image editor instead of growing one, and the temp folder cannot grow without bound |
-| P1.6 | Recording is `ffmpeg -f gdigrab` over the frame rect, frame hidden while recording | the simplest reliable rect recorder; the frame must not appear in its own video, and DDA stays a later upgrade for full-screen rate |
+| P1.6 | Recording is `ffmpeg -f gdigrab` over the frame rect, with the frame kept on screen as a red REC marker and the captured rect inset 2 px inside that border | the frame must not appear in its own video, but the user still needs a visible recording indicator |
+| P1.6 | Audio is our own WASAPI loopback to WAV, muxed by ffmpeg at stop | these ffmpeg builds ship no `wasapi` input, and a separate WAV keeps the mux a stream copy |
+| P1.4 | Window zoom v1 is a DWM thumbnail in a fullscreen topmost window | live and hardware-composited without a capture-and-present pipeline; shader upscaling can replace the presentation later |
 | P1.5 | Flameshot handoff is experimental, frame-local `Ctrl+F`, disabled by an empty `[external] flameshot` | Flameshot's own Print/keys and behavior stay untouched, and its 7 px edge bug makes the handoff unreliable |
 | P1.5 | Region is monitor-relative and inset from the screen origin when within 7 px | Flameshot pins a preset selection to (0,0) if its x or y is under 7 px, and interprets `--region` relative to the monitor that hosts its overlay |
 | P0.6 | Releases and Scoop manifests use the `-ex` naming; the hash stays empty until the first release | assets and manifest autoupdate must agree; never call an unreleased package installable |

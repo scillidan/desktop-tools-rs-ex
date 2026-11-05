@@ -80,8 +80,18 @@ editor = ""
 # recording so it never enters the video).
 [record]
 dir = "%USERPROFILE%\\Videos\\dt-ocr"   # %VAR% expanded, created on first use
+name = "dt-ocr-{date}-{time}"           # {date} YYYYMMDD, {time} HHMMSS, {datetime}
 fps = 30                                # clamped to 5..60
 ffmpeg = "ffmpeg"                       # PATH name or absolute exe
+# Desktop audio (WASAPI loopback of the default playback device). Captured as a
+# separate WAV and muxed into the mp4 at stop; a missing device only warns.
+audio = true
+# x264 quality: lower = better/bigger, clamped to 16..34.
+crf = 20
+# Safeguards: auto-stop after this many minutes (0 = no limit) and refuse to
+# start / stop early when the target volume has less free space than this.
+max_minutes = 60
+min_free_mb = 500
 
 # action = "combo" — combo syntax: ctrl+alt+s, ^!s (AHK sigils), win+f2.
 # NOTE: these are GLOBAL hotkeys. Defaults are chosen to avoid Windows
@@ -104,6 +114,7 @@ toggle  = "win+shift+o"  # show/hide the OCR layer (Win+O is reserved by Windows
 quick_ocr = "ctrl+alt+o"        # draw a rect, OCR it, copy the text, then close the frame
 auto_ocr  = "ctrl+shift+alt+o"  # draw or reuse the frame, OCR now, stay in automatic OCR
 record    = "ctrl+alt+r"        # start/stop recording the frame rect (frame hides)
+scale     = "ctrl+alt+z"        # fullscreen DWM-thumbnail zoom of the focused window
 # Flameshot is not a global hotkey: with the frame focused, Ctrl+F hands the
 # frame rect to Flameshot's own UI (Print stays Flameshot's key; disabled until
 # [external] flameshot names the executable).

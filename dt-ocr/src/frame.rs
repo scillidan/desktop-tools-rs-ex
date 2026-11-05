@@ -27,6 +27,7 @@ pub const COLOR_KEY: COLORREF = COLORREF(0x00FE00FF); // RGB(255, 0, 254)
 const BORDER_DRAG: u32 = 0x00C8C800; // RGB(0, 200, 200) cyan — draggable
 const BORDER_PINNED: u32 = 0x00D77800; // RGB(0, 120, 215) blue — pinned
 const BORDER_SPEC: u32 = 0x0000A5FF; // RGB(255, 165, 0) orange — size mode
+const BORDER_RECORD: u32 = 0x000000FF; // RGB(255, 0, 0) red — recording
 const BAR_ORANGE: u32 = 0x0000A5FF; // RGB(255, 165, 0) — status strip bg / inside text
 const TEXT_BLACK: u32 = 0x00000000;
 const TUNE_RED: u32 = 0x000000FF; // RGB(255, 0, 0) — value clamped at the monitor limit
@@ -97,6 +98,8 @@ pub struct FrameState {
     /// An OCR result (mask or outside editor) is on screen: keep the border
     /// green until it is dismissed.
     result: bool,
+    /// A recording is running: the border is red (REC) until it stops.
+    recording: bool,
     /// Generation of the OCR run whose result may be shown.
     ocr_seq: Option<u64>,
     /// OCR result held until the result flash finishes (timer 6).
@@ -369,6 +372,7 @@ pub unsafe fn create(
             entered_once: false,
             flash: Flash::None,
             result: false,
+            recording: false,
             ocr_seq: None,
             pending: None,
             ocr_intent: crate::ocr::Intent::Manual,
@@ -662,11 +666,16 @@ pub unsafe fn toggle_pin(hwnd: HWND) {
     set_mode(hwnd, transition(state(hwnd).mode, Event::PinHotkey));
 }
 
-/// Click-through whenever the frame must not eat input: pinned, or while an
-/// OCR worker is reading the region underneath.
+/// Click-through whenever the frame must not eat input: pinned, while an OCR
+/// worker is reading the region underneath, or while it marks a recording (the
+/// user keeps using the app being recorded).
 unsafe fn apply_click_through(hwnd: HWND, s: &FrameState) {
+    set_click_through(hwnd, s.mode == Mode::Pinned || s.ocr_running || s.recording);
+}
+
+/// Applies the click-through extended style directly.
+unsafe fn set_click_through(hwnd: HWND, want: bool) {
     let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    let want = s.mode == Mode::Pinned || s.ocr_running;
     let new_ex = if want {
         ex | WS_EX_TRANSPARENT.0 as isize
     } else {
@@ -722,6 +731,34 @@ unsafe fn switch_tune(hwnd: HWND, field: TuneField) {
         s.tune = Some(Tune::new(field, limit));
     }
     set_mode(hwnd, transition(s.mode, Event::TuneKey));
+}
+
+/// Marks the frame as recording (red REC border, click-through marker).
+/// Restored by `false`.
+pub unsafe fn set_recording(hwnd: HWND, on: bool) {
+    let s = state(hwnd);
+    s.recording = on;
+    let want = s.mode == Mode::Pinned || s.ocr_running || on;
+    set_click_through(hwnd, want);
+    let _ = InvalidateRect(Some(hwnd), None, false);
+    let _ = UpdateWindow(hwnd);
+    sync_status(hwnd);
+    logline(if on {
+        "frame: recording border red"
+    } else {
+        "frame: recording border off"
+    });
+}
+
+/// Give the frame the foreground and keyboard focus (used when a recording
+/// stops, so Esc/Ctrl keys land on it again).
+pub unsafe fn focus(hwnd: HWND) {
+    if !crate::desktops::is_on_current(hwnd) {
+        return;
+    }
+    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    let _ = SetForegroundWindow(hwnd);
+    let _ = SetFocus(Some(hwnd));
 }
 
 /// Closing the frame hides it; any command summons it back without stealing
@@ -1677,7 +1714,11 @@ unsafe fn tune_limit(hwnd: HWND, field: TuneField) -> i32 {
     (2 * d1.min(d2)).max(16)
 }
 
-fn border_color(flash: Flash, result: bool, mode: Mode) -> u32 {
+fn border_color(flash: Flash, result: bool, recording: bool, mode: Mode) -> u32 {
+    if recording {
+        // REC: red beats every other state, including a lingering result.
+        return BORDER_RECORD;
+    }
     match flash {
         Flash::Cyan => FLASH_CYAN,
         Flash::Trigger => FLASH_TRIGGER,
@@ -1700,7 +1741,7 @@ unsafe fn paint(hwnd: HWND) {
     let key_brush = CreateSolidBrush(COLOR_KEY);
     let _ = FillRect(hdc, &client, key_brush);
     let frame_client = client; // pre-inset rect for the command bar
-    let border = border_color(s.flash, s.result, s.mode);
+    let border = border_color(s.flash, s.result, s.recording, s.mode);
     let outer_brush = CreateSolidBrush(COLORREF(border));
     let inner_brush = CreateSolidBrush(COLORREF(border));
     // 2 px border (FrameRect is always one logical unit = one physical px).
@@ -2220,21 +2261,62 @@ mod tests {
 
     #[test]
     fn result_border_stays_green_until_dismissed() {
-        assert_eq!(border_color(Flash::None, true, Mode::Move), FLASH_RESULT);
-        assert_eq!(border_color(Flash::None, true, Mode::Pinned), FLASH_RESULT);
-        assert_eq!(border_color(Flash::None, true, Mode::Tune), FLASH_RESULT);
         assert_eq!(
-            border_color(Flash::Trigger, false, Mode::Move),
+            border_color(Flash::None, true, false, Mode::Move),
+            FLASH_RESULT
+        );
+        assert_eq!(
+            border_color(Flash::None, true, false, Mode::Pinned),
+            FLASH_RESULT
+        );
+        assert_eq!(
+            border_color(Flash::None, true, false, Mode::Tune),
+            FLASH_RESULT
+        );
+        assert_eq!(
+            border_color(Flash::Trigger, false, false, Mode::Move),
             FLASH_TRIGGER
         );
-        assert_eq!(border_color(Flash::None, false, Mode::Move), BORDER_DRAG);
-        assert_eq!(border_color(Flash::Cyan, true, Mode::Move), FLASH_CYAN);
+        assert_eq!(
+            border_color(Flash::None, false, false, Mode::Move),
+            BORDER_DRAG
+        );
+        assert_eq!(
+            border_color(Flash::Cyan, true, false, Mode::Move),
+            FLASH_CYAN
+        );
     }
 
     #[test]
     fn ocr_trigger_and_result_colours_are_distinct() {
         assert_eq!(FLASH_TRIGGER, 0x002F_FFAD); // GreenYellow #ADFF2F
         assert_eq!(FLASH_RESULT, 0x0032_CD32); // LimeGreen #32CD32
+    }
+
+    #[test]
+    fn recording_red_beats_every_other_border() {
+        assert_eq!(BORDER_RECORD, 0x0000_00FF); // RGB(255,0,0)
+        for mode in [
+            Mode::Move,
+            Mode::Pinned,
+            Mode::Input,
+            Mode::Drag,
+            Mode::Tune,
+        ] {
+            assert_eq!(border_color(Flash::None, false, true, mode), BORDER_RECORD);
+            // A running OCR result does not mask the REC colour.
+            assert_eq!(border_color(Flash::Result, true, true, mode), BORDER_RECORD);
+            assert_eq!(border_color(Flash::Cyan, false, true, mode), BORDER_RECORD);
+        }
+        // Without a recording the old hierarchy is untouched.
+        assert_eq!(
+            border_color(Flash::None, false, false, Mode::Move),
+            BORDER_DRAG
+        );
+        assert_eq!(
+            border_color(Flash::None, true, false, Mode::Move),
+            FLASH_RESULT
+        );
     }
 
     #[test]

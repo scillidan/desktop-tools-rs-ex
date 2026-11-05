@@ -66,10 +66,20 @@ pub struct Config {
     pub external_editor: String,
     /// Recording output folder (`%VAR%` expanded).
     pub record_dir: String,
+    /// Recording file name stem; `{date}`, `{time}`, `{datetime}` expand.
+    pub record_name: String,
     /// Recording frame rate (clamped to 5..=60).
     pub record_fps: u32,
     /// ffmpeg executable used for recording (PATH name or absolute).
     pub record_ffmpeg: String,
+    /// Capture the default playback device (desktop audio) with the recording.
+    pub record_audio: bool,
+    /// x264 CRF for recordings, clamped to 16..=34 (lower = larger).
+    pub record_crf: u32,
+    /// Auto-stop a recording after this many minutes; 0 = unlimited.
+    pub record_max_minutes: u32,
+    /// Refuse to start / stop early below this much free space.
+    pub record_min_free_mb: u32,
     pub bindings: Bindings,
 }
 
@@ -133,6 +143,7 @@ pub struct Bindings {
     pub quick_ocr: Combo,
     pub auto_ocr: Combo,
     pub record: Combo,
+    pub scale: Combo,
 }
 
 /// Frame actions a binding can trigger (hotkey ids index into this order).
@@ -149,10 +160,11 @@ pub enum Action {
     QuickOcr,
     AutoOcr,
     Record,
+    Scale,
 }
 
 impl Action {
-    pub const ALL: [Action; 11] = [
+    pub const ALL: [Action; 12] = [
         Action::Draw,
         Action::Resize,
         Action::Pin,
@@ -164,6 +176,7 @@ impl Action {
         Action::QuickOcr,
         Action::AutoOcr,
         Action::Record,
+        Action::Scale,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -178,6 +191,7 @@ impl Action {
             Action::QuickOcr => "quick_ocr",
             Action::AutoOcr => "auto_ocr",
             Action::Record => "record",
+            Action::Scale => "scale",
         }
     }
     fn default_combo(self) -> Combo {
@@ -197,6 +211,7 @@ impl Action {
             Action::QuickOcr => "ctrl+alt+o".parse().unwrap(),
             Action::AutoOcr => "ctrl+shift+alt+o".parse().unwrap(),
             Action::Record => "ctrl+alt+r".parse().unwrap(),
+            Action::Scale => "ctrl+alt+z".parse().unwrap(),
         }
     }
     pub(crate) fn get(self, b: &Bindings) -> Combo {
@@ -212,6 +227,7 @@ impl Action {
             Action::QuickOcr => b.quick_ocr,
             Action::AutoOcr => b.auto_ocr,
             Action::Record => b.record,
+            Action::Scale => b.scale,
         }
     }
     pub(crate) fn set(self, b: &mut Bindings, c: Combo) {
@@ -227,6 +243,7 @@ impl Action {
             Action::QuickOcr => b.quick_ocr = c,
             Action::AutoOcr => b.auto_ocr = c,
             Action::Record => b.record = c,
+            Action::Scale => b.scale = c,
         }
     }
 }
@@ -245,6 +262,7 @@ impl Default for Bindings {
             quick_ocr: Combo::default(),
             auto_ocr: Combo::default(),
             record: Combo::default(),
+            scale: Combo::default(),
         };
         for a in Action::ALL {
             a.set(&mut b, a.default_combo());
@@ -277,8 +295,13 @@ impl Default for Config {
             flameshot: String::new(),
             external_editor: String::new(),
             record_dir: "%USERPROFILE%\\Videos\\dt-ocr".to_string(),
+            record_name: "dt-ocr-{date}-{time}".to_string(),
             record_fps: 30,
             record_ffmpeg: "ffmpeg".to_string(),
+            record_audio: true,
+            record_crf: 20,
+            record_max_minutes: 60,
+            record_min_free_mb: 500,
             bindings: Bindings::default(),
         }
     }
@@ -488,6 +511,9 @@ pub fn parse(text: &str) -> Result<Config> {
                 if let Some(v) = t.get("dir").and_then(|v| v.as_str()) {
                     cfg.record_dir = v.to_string();
                 }
+                if let Some(v) = t.get("name").and_then(|v| v.as_str()) {
+                    cfg.record_name = v.to_string();
+                }
                 if let Some(v) = t.get("fps") {
                     match v.as_integer() {
                         Some(n) => cfg.record_fps = n.clamp(5, 60) as u32,
@@ -496,6 +522,30 @@ pub fn parse(text: &str) -> Result<Config> {
                 }
                 if let Some(v) = t.get("ffmpeg").and_then(|v| v.as_str()) {
                     cfg.record_ffmpeg = v.to_string();
+                }
+                if let Some(v) = t.get("audio") {
+                    match v.as_bool() {
+                        Some(b) => cfg.record_audio = b,
+                        None => eprintln!("warn: record.audio must be true/false; using true"),
+                    }
+                }
+                if let Some(v) = t.get("crf") {
+                    match v.as_integer() {
+                        Some(n) => cfg.record_crf = n.clamp(16, 34) as u32,
+                        None => eprintln!("warn: record.crf must be an integer; using 20"),
+                    }
+                }
+                if let Some(v) = t.get("max_minutes") {
+                    match v.as_integer() {
+                        Some(n) if n >= 0 => cfg.record_max_minutes = n as u32,
+                        _ => eprintln!("warn: record.max_minutes must be >= 0; using 60"),
+                    }
+                }
+                if let Some(v) = t.get("min_free_mb") {
+                    match v.as_integer() {
+                        Some(n) if n >= 0 => cfg.record_min_free_mb = n as u32,
+                        _ => eprintln!("warn: record.min_free_mb must be >= 0; using 500"),
+                    }
                 }
             }
             None => eprintln!("warn: [record] must be a table; using defaults"),
@@ -621,8 +671,13 @@ mod tests {
                 flameshot: String::new(),
                 external_editor: String::new(),
                 record_dir: "%USERPROFILE%\\Videos\\dt-ocr".to_string(),
+                record_name: "dt-ocr-{date}-{time}".to_string(),
                 record_fps: 30,
                 record_ffmpeg: "ffmpeg".to_string(),
+                record_audio: true,
+                record_crf: 20,
+                record_max_minutes: 60,
+                record_min_free_mb: 500,
                 bindings: Bindings::default(),
             }
         );
@@ -707,12 +762,24 @@ mod tests {
     fn record_config_parses_and_clamps_fps() {
         let cfg = parse("").unwrap();
         assert_eq!(cfg.record_dir, "%USERPROFILE%\\Videos\\dt-ocr");
+        assert_eq!(cfg.record_name, "dt-ocr-{date}-{time}");
         assert_eq!(cfg.record_fps, 30);
         assert_eq!(cfg.record_ffmpeg, "ffmpeg");
-        let cfg = parse("[record]\ndir = \"E:\\\\clips\"\nfps = 200\nffmpeg = \"C:\\\\ff.exe\"\n")
-            .unwrap();
+        assert!(cfg.record_audio);
+        assert_eq!(cfg.record_crf, 20);
+        assert_eq!(cfg.record_max_minutes, 60);
+        assert_eq!(cfg.record_min_free_mb, 500);
+        let cfg = parse(
+            "[record]\ndir = \"E:\\\\clips\"\nfps = 200\naudio = false\ncrf = 40\nmax_minutes = 0\nmin_free_mb = 50\nffmpeg = \"C:\\\\ff.exe\"\nname = \"talk-{datetime}\"\n",
+        )
+        .unwrap();
         assert_eq!(cfg.record_dir, "E:\\clips");
+        assert_eq!(cfg.record_name, "talk-{datetime}");
         assert_eq!(cfg.record_fps, 60);
+        assert!(!cfg.record_audio);
+        assert_eq!(cfg.record_crf, 34);
+        assert_eq!(cfg.record_max_minutes, 0);
+        assert_eq!(cfg.record_min_free_mb, 50);
         assert_eq!(cfg.record_ffmpeg, "C:\\ff.exe");
         assert_eq!(
             parse("").unwrap().bindings.record,

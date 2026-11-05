@@ -222,6 +222,7 @@ fn file_name(st: &SYSTEMTIME) -> String {
 }
 
 /// `dt-ocr-YYYYMMDD-HHMMSS.mp4` in local time (recording output).
+#[allow(dead_code)]
 pub(crate) fn record_name() -> String {
     let st = unsafe { GetLocalTime() };
     format!(
@@ -359,6 +360,25 @@ unsafe fn window_under(pt: POINT) -> Option<(HWND, RECT)> {
     let mut hit = Under { pt, found: None };
     let _ = EnumWindows(Some(under_cb), LPARAM(&mut hit as *mut _ as isize));
     hit.found
+}
+
+/// The window the user is looking at, for actions that need the HWND itself
+/// (window zoom). Same precedence as `window_target`, but the monitor fallback
+/// is not a window, so it yields None.
+pub(crate) unsafe fn target_window() -> Option<HWND> {
+    let fg = GetForegroundWindow();
+    if usable(fg).is_some() {
+        return Some(GetAncestor(fg, GA_ROOTOWNER));
+    }
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        let pos = GetMessagePos();
+        pt = POINT {
+            x: pos as i16 as i32,
+            y: (pos >> 16) as i16 as i32,
+        };
+    }
+    window_under(pt).map(|(hwnd, _)| hwnd)
 }
 
 /// Focused window, else the window under the cursor, else the monitor there.
