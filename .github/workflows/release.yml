@@ -23,8 +23,8 @@ jobs:
           $name = "desktop-tools-rs-ex-$env:GITHUB_REF_NAME-win64"
           $dir = "dist/$name"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          Copy-Item target/release/dt-ocr.exe $dir
-          Copy-Item dt-ocr.toml $dir
+          Copy-Item target/release/screen-tools-rs.exe $dir
+          Copy-Item screen-tools.toml $dir
           Compress-Archive -Path "$dir/*" -DestinationPath "dist/$name.zip"
           Get-FileHash "dist/$name.zip" -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $name.zip" } |

@@ -1,5 +1,5 @@
 [workspace]
-members = ["dt-common", "dt-ocr"]
+members = ["dt-common", "screen-tools-rs"]
 resolver = "2"
 
 [workspace.dependencies]

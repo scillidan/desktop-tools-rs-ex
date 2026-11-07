@@ -27,7 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::logline;
 
-const CLASS_NAME: windows::core::PCWSTR = w!("dt-ocr.zoom");
+const CLASS_NAME: windows::core::PCWSTR = w!("screen-tools-rs.zoom");
 
 static ZOOM: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static THUMB: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
@@ -85,7 +85,7 @@ unsafe fn open() -> Result<()> {
     let hwnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         CLASS_NAME,
-        w!("dt-ocr zoom"),
+        w!("screen-tools-rs zoom"),
         WS_POPUP,
         m.left,
         m.top,

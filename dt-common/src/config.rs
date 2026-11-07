@@ -7,6 +7,21 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Copy a legacy config once without replacing an existing destination.
+pub fn import_legacy(path: &Path, legacy: &Path) -> Result<bool> {
+    if path.exists() || !legacy.exists() {
+        return Ok(false);
+    }
+    std::fs::copy(legacy, path).with_context(|| {
+        format!(
+            "cannot import legacy {} as {}",
+            legacy.display(),
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
 /// `path` if it exists, else the default TOML written to `path` first.
 pub fn load_or_create(path: &Path, default_toml: &str) -> Result<String> {
     if !path.exists() {
@@ -37,7 +52,7 @@ mod tests {
     fn load_or_create_roundtrip() {
         let dir = std::env::temp_dir().join(format!("dt-common-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("dt-ocr.toml");
+        let path = dir.join("screen-tools.toml");
         let _ = std::fs::remove_file(&path);
 
         let text = load_or_create(&path, "x = 1\n").unwrap();
@@ -50,10 +65,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_import_is_once_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("dt-common-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("screen-tools.toml");
+        let legacy = dir.join("dt-ocr.toml");
+        std::fs::write(&legacy, "frame_w = 500\n").unwrap();
+        assert!(import_legacy(&path, &legacy).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "frame_w = 500\n");
+        std::fs::write(&legacy, "frame_w = 900\n").unwrap();
+        assert!(!import_legacy(&path, &legacy).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "frame_w = 500\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn exe_dir_file_is_absolute_and_named() {
-        let p = exe_dir_file("dt-ocr.toml").unwrap();
+        let p = exe_dir_file("screen-tools.toml").unwrap();
         assert!(p.is_absolute());
-        assert_eq!(p.file_name().unwrap(), "dt-ocr.toml");
+        assert_eq!(p.file_name().unwrap(), "screen-tools.toml");
     }
 
     #[test]

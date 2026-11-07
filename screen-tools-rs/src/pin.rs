@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SIZE, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-const CLASS: PCWSTR = w!("dt-ocr.pin");
+const CLASS: PCWSTR = w!("screen-tools-rs.pin");
 /// Edge zone for the resize-arrow hit test, in pixels.
 const GRIP: i32 = 6;
 
@@ -283,7 +283,7 @@ pub unsafe fn show(rect: RECT, w: i32, h: i32, bgra: &[u8], style: Style) -> Res
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
         CLASS,
-        w!("dt-ocr.pin"),
+        w!("screen-tools-rs.pin"),
         WS_POPUP,
         x - m,
         y - m,

@@ -262,7 +262,7 @@ pub unsafe fn create(
     ocr_language: Option<String>,
 ) -> Result<HWND> {
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-    let class = w!("dt-ocr.frame");
+    let class = w!("screen-tools-rs.frame");
     let resource = windows::core::PCWSTR::from_raw(std::ptr::without_provenance(1));
     let app_icon = LoadIconW(Some(instance), resource).unwrap_or_default();
     let wc = WNDCLASSW {
@@ -305,7 +305,7 @@ pub unsafe fn create(
     let hwnd = CreateWindowExW(
         FRAME_EX_STYLE,
         class,
-        w!("dt-ocr"),
+        w!("screen-tools-rs"),
         WS_POPUP,
         pos.l,
         pos.t,
@@ -319,7 +319,7 @@ pub unsafe fn create(
     SetLayeredWindowAttributes(hwnd, COLOR_KEY, 0, LWA_COLORKEY)?;
     // Status strip window: shown outside the frame (below/above) during spec
     // mode; hidden when the frame is full — then the strip renders inside.
-    let status_class = w!("dt-ocr.status");
+    let status_class = w!("screen-tools-rs.status");
     let swc = WNDCLASSW {
         style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(status_wndproc),
@@ -339,7 +339,7 @@ pub unsafe fn create(
         // which is why the strip was invisible.
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         status_class,
-        w!("dt-ocr status"),
+        w!("screen-tools-rs status"),
         WS_POPUP,
         0,
         0,

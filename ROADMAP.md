@@ -9,7 +9,7 @@ in `AGENTS.md`; this file is only what is left to build.
 - **P0.1** workspace + `dt-common` (keys, layout, exe-relative config).
 - **P0.2** frame window: five-state interaction model, SizeSpec resize, mode
   hotkeys, one frame per virtual desktop, native tray, resident host. Single
-  instance via `Local\dt-ocr.single`; duplicate `WM_HOTKEY`s inside 150 ms are
+  instance via `Local\screen-tools-rs.single`; duplicate `WM_HOTKEY`s inside 150 ms are
   dropped so repeated input cannot stack windows.
 - **P0.3** OCR mask: click-through capture, frozen-snapshot overlay with
   per-word hit-testing, `box` / `box+mask` / `box+outside` presentations,
@@ -95,7 +95,7 @@ in `AGENTS.md`; this file is only what is left to build.
   its status strip; startup creates no visible frame. Single-instance mutex.
 - Next: a floating action bar after a selection (copy / save / pin), per-desktop
   pinning, and the bridges planned separately in P1.5 (Flameshot) and P1.6
-  (recording). Flameshot stays the better free-form capture; dt-ocr owns the
+  (recording). Flameshot stays the better free-form capture; screen-tools-rs owns the
   frame-for-OCR workflow.
 - Done when: a focused-window capture reaches clipboard, disk and a pinned
   window, and the show-desktop case captures something sensible instead of
@@ -108,13 +108,13 @@ in `AGENTS.md`; this file is only what is left to build.
   launches `flameshot gui --region WxH+X+Y`, and leaves the frame hidden when
   Flameshot exits. Flameshot's known limitation: a preset region within 7 px of
   the monitor origin pins at the top-left corner, so the bridge insets
-  edge-touching frames (up to 6 px lost on that edge). dt-ocr writes no file and
+  edge-touching frames (up to 6 px lost on that edge). screen-tools-rs writes no file and
   touches no clipboard on this path. One handoff at a time.
   `flameshot_bridge_test.ps1` passes 8/8 (disabled-by-default gate, then hide,
   region log, daemon, frame stays exited, exit log).
 - Implemented: `Ctrl+O` on a focused frame (not Pinned, any resize substate)
   saves a temp PNG and launches `[external] editor` with it; empty disables.
-  Temp files live in `%TEMP%\dt-ocr` and files older than a day are removed at
+  Temp files live in `%TEMP%\screen-tools-rs` and files older than a day are removed at
   startup and before each handoff.
 - Implemented: `Ctrl+A` on a focused frame (not Pinned) fills the whole current
   monitor including the taskbar, without changing the mode.
@@ -123,7 +123,7 @@ in `AGENTS.md`; this file is only what is left to build.
 - Remaining: physical verification on a multi-monitor negative-coordinate
   region, the pin location when the Flameshot daemon was already running before
   the bridge, and whether `Print` conflicts with an existing Flameshot-hotkey
-  configuration (dt-ocr logs a registration warning if the key is taken).
+  configuration (screen-tools-rs logs a registration warning if the key is taken).
 
 ### P1.6 Recording bridge (separate plan)
 - Done: `record` (`ctrl+alt+r`, global, id 11) starts/stops a recording of the
@@ -136,7 +136,7 @@ in `AGENTS.md`; this file is only what is left to build.
   -thread_queue_size 1024 -max_muxing_queue_size 1024` with CREATE_NO_WINDOW and
   a piped stdin. Stop writes `q`, waits up to 5 s, kills if needed; daemon exit
   also stops an active session. Output is `[record] dir` + the `[record] name`
-  template (`{date}`, `{time}`, `{datetime}`; default `dt-ocr-{date}-{time}`).
+  template (`{date}`, `{time}`, `{datetime}`; default `screen-tools-rs-{date}-{time}`).
 - Done: desktop audio on by default. ffmpeg here has no `wasapi` input, so
   `audio.rs` captures the default playback device through WASAPI loopback
   (16-bit PCM WAV, silence padded when nothing plays) and ffmpeg muxes it with a
@@ -164,7 +164,7 @@ in `AGENTS.md`; this file is only what is left to build.
   fallback only.
 - Status: the rect recorder shipped in P1.6 with `ffmpeg -f gdigrab` (simple,
   reliable for a rect). DDA stays the upgrade path for full-screen/high-fps
-  capture; `shortcut:` is recorded in `dt-ocr/src/record.rs`.
+  capture; `shortcut:` is recorded in `screen-tools-rs/src/record.rs`.
 - Shared with P1.2: quality, fps, output config; locate `ffmpeg.exe` (Scoop).
 - Decide the DDA details at start with context7 + reading wcap's source.
 

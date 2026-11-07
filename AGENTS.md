@@ -89,12 +89,12 @@ window scaling. Same user, same machine, same conventions.
 
 - `dt-common` — keys/layout/config primitives copied from desktop-tools-rs
   (repo folder `desktop-tools-rs`) with provenance comments; shared by tools
-- `dt-ocr` — OCR frame window, overlay mask, drag-select OCR, engines; native
+- `screen-tools-rs` — OCR frame window, overlay mask, drag-select OCR, engines; native
   Quit tray and procedural exe/tray icon (`icon.rs`, `build.rs`)
 - `dt-rec` (future) — recording (wcap model)
 - `dt-scale` (future) — window scaling (Magpie model)
 
-`dt-ocr/src` in one line each: `main.rs` config load, hotkeys, message loop,
+`screen-tools-rs/src` in one line each: `main.rs` config load, hotkeys, message loop,
 dispatch, log; `host.rs` resident host window; `frame.rs` frame window, modes,
 SizeSpec input/tune, status strip; `interaction.rs` pure five-state machine;
 `overlay.rs` red draw band; `capture.rs` GDI BitBlt, clipboard, PNG sink; `hotkeys.rs`
@@ -154,7 +154,7 @@ and its own editor. Only one handoff can be open at a time.
 `Ctrl+O` on a focused frame (not Pinned) saves the frame to a temp PNG and
 launches `[external] editor` with it (e.g. `photocraft`); the frame is put away.
 It works from Move and every resize substate. Empty `editor` disables the key.
-Handoff PNGs go to `%TEMP%\dt-ocr`; files older than a day are deleted at
+Handoff PNGs go to `%TEMP%\screen-tools-rs`; files older than a day are deleted at
 startup and before each new handoff.
 
 `Ctrl+A` on a focused frame (not Pinned) grows it to the whole monitor
@@ -181,7 +181,7 @@ only warns. Stop writes `q` to ffmpeg's stdin, waits up to 5 s, then kills,
 clears the red border, re-shows the frame and gives it keyboard focus again. A
 watchdog auto-stops at `[record] max_minutes` (default 60, 0 = no cap) or when
 free space drops below `min_free_mb`. Output is
-`dt-ocr-YYYYMMDD-HHMMSS.mp4` unless the name template says otherwise. A missing
+`screen-tools-rs-YYYYMMDD-HHMMSS.mp4` unless the name template says otherwise. A missing
 frame logs `record ignored: no frame`; exiting the daemon stops an active
 recording. Our own mask/pins are still recordable, so close them first.
 
@@ -255,7 +255,7 @@ DIB *section* handle reads as `null` in other processes (a .NET
 `Clipboard.GetImage()` returns nothing). `OpenClipboard` is retried for ~300 ms:
 IME hosts and clipboard managers hold it briefly. When the clipboard wedges for
 good, every app in the session loses copy/paste and only an explorer restart (or
-a logoff) clears it — that is machine state, not dt-ocr. Bisected 2026-10-28:
+a logoff) clears it — that is machine state, not screen-tools-rs. Bisected 2026-10-28:
 text writes stay healthy for minutes; writing an image wedges it within ~20
 writes via both .NET/OLE and our raw CF_DIB, with or without CopyQ, so image
 writes are the trigger and the holder is not CopyQ (`GetOpenClipboardWindow`
@@ -308,19 +308,19 @@ it posts `WM_NULL` and destroys the HMENU. That is the tray-icon/tray-rs flow,
 not a self-drawn Win11-style window, and the owner must be foreground or a
 popup can stay stuck on screen.
 
-A named mutex (`Local\dt-ocr.single`) makes the process single-instance: a
-second launch logs `another dt-ocr instance is already running; exiting` before
+A named mutex (`Local\screen-tools-rs.single`) makes the process single-instance: a
+second launch logs `another screen-tools-rs instance is already running; exiting` before
 creating a host, frame or tray icon. Without it, quitting one tray leaves the
 other instances running and looking like the app cannot be exited. Hotkeys
 already use `MOD_NOREPEAT`; the message loop also drops the same action arriving
 twice within 150 ms, so injected duplicates cannot stack capture/pin windows.
 
 P0.1 status: workspace + dt-common (`keys`, `layout`, `config` exe-relative
-helpers) + dt-ocr (empty window, `dt-ocr.toml` next to exe, `dt-ocr.log`).
+helpers) + screen-tools-rs (empty window, `screen-tools.toml` next to exe, `screen-tools-rs.log`).
 The kbdhook pipeline is intentionally NOT copied yet; P0.2 owns the hotkeys
 and a minimal native tray.
 
-P0.2 status: dt-ocr frame window complete. `interaction.rs` is the tested,
+P0.2 status: screen-tools-rs frame window complete. `interaction.rs` is the tested,
 explicit five-state model: Move (cyan), Pinned (blue), and orange resize
 substates Input / Drag / Tune. `frame.rs` only applies those transitions;
 there are no independent pinned/spec booleans. pin (`ctrl+shift+alt+t`)
@@ -424,7 +424,7 @@ back to Windows OCR (zh-Hans-CN then en-US) if RapidOCR cannot start. Explicit
 chooses RapidOCR. Forced engines report an error instead of silently changing
 provider. RapidOCR is a persistent `uv run` Python worker, launched with
 `CREATE_NO_WINDOW`, using the embedded PEP-723 script
-`dt-ocr/scripts/rapidocr_worker.py`; it returns native character boxes, grouped
+`screen-tools-rs/scripts/rapidocr_worker.py`; it returns native character boxes, grouped
 into Latin words and individual CJK characters. Tesseract supplies TSV word
 boxes. Temporary PNGs are deleted after each request. When one English row
 matches several horizontally separated primary fragments (for example `87` and
@@ -488,7 +488,7 @@ covers image copy and quick-save from resize plus pinned copy (8 checks).
 
 | Phase | Decision | Why |
 |---|---|---|
-| P0.1 | `dt-common` + `dt-ocr` crates | tools share config/keys/tray; recording and scaling arrive as their own crates |
+| P0.1 | `dt-common` + `screen-tools-rs` crates | tools share config/keys/tray; recording and scaling arrive as their own crates |
 | P0.2 | Edge drags use `GetCursorPos` and repaint each step | `WM_MOUSEMOVE` client coordinates move with the frame, so resize deltas fed back into themselves and collapsed it to 16 px |
 | P0.2 | Work-area bounds default on; `[frame] work_area = false` uses the full monitor | follow the Windows default (exclude taskbar) with one hot-reloadable override shared by every sizing path |
 | P0.2 | One process, one `WS_EX_APPWINDOW` frame per virtual desktop | a Shell application view is what makes desktop isolation work; per-process hotkeys avoid conflicts |

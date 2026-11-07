@@ -1,8 +1,8 @@
 # EXPERIMENT.md — using Neovim as an external editor
 
-Status: explored in `dt-ocr` as `Ctrl+E` in the `box+outside` result editor, then
+Status: explored in `screen-tools-rs` as `Ctrl+E` in the `box+outside` result editor, then
 removed from the product code. This file keeps the reusable business logic so a
-future tool (or a future dt-ocr phase) can implement it deliberately instead of
+future tool (or a future screen-tools-rs phase) can implement it deliberately instead of
 re-discovering it.
 
 The question is not "how do I start nvim". It is "what must an application own
@@ -240,7 +240,7 @@ input, and a second monitor with a non-primary DPI.
   renderer. Do not mix it with Level A: they have different input, IME and
   clipboard models.
 
-## 13. Why it was removed from dt-ocr
+## 13. Why it was removed from screen-tools-rs
 
 The experiment proved the mechanic: WezTerm opened with a unique class, docked
 below the frame, stayed topmost, disabled the native editor, and handed an

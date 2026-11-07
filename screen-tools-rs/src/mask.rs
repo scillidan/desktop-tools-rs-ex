@@ -211,7 +211,7 @@ pub unsafe fn show(parent: HWND, rect: Rect, words: Vec<Word>, snapshot: Snapsho
     );
 
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-    let class = w!("dt-ocr.mask");
+    let class = w!("screen-tools-rs.mask");
     let wc = WNDCLASSW {
         style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(wndproc),
@@ -785,7 +785,7 @@ struct PageState {
 
 unsafe fn create_page(owner: HWND, frame: Rect, text: &str) -> Result<HWND> {
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-    let class = w!("dt-ocr.maskpage");
+    let class = w!("screen-tools-rs.maskpage");
     let wc = WNDCLASSW {
         style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(page_wndproc),

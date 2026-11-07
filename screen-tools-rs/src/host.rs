@@ -21,7 +21,7 @@ impl Host {
     pub fn new() -> Result<Self> {
         unsafe {
             let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-            let class = windows::core::w!("dt-ocr.host");
+            let class = windows::core::w!("screen-tools-rs.host");
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(wndproc),
                 hInstance: instance,
@@ -40,7 +40,7 @@ impl Host {
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 class,
-                windows::core::w!("dt-ocr.host"),
+                windows::core::w!("screen-tools-rs.host"),
                 WS_POPUP,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,

@@ -160,10 +160,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "regenerates assets/dt-ocr.ico after editing the glyph"]
+    #[ignore = "regenerates assets/screen-tools-rs.ico after editing the glyph"]
     fn write_icon_asset() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("dt-ocr.ico"), ico_bytes()).unwrap();
+        std::fs::write(dir.join("screen-tools-rs.ico"), ico_bytes()).unwrap();
     }
 }

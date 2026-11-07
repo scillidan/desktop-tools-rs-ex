@@ -27,13 +27,15 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Classes owned by the daemon (never a capture target) and by the shell's
 /// desktop; everything else is fair game.
-const OWN_CLASSES: [&str; 6] = [
-    "dt-ocr.frame",
-    "dt-ocr.mask",
-    "dt-ocr.overlay",
-    "dt-ocr.host",
-    "dt-ocr.status",
-    "dt-ocr.pin",
+const OWN_CLASSES: [&str; 8] = [
+    "screen-tools-rs.frame",
+    "screen-tools-rs.mask",
+    "screen-tools-rs.maskpage",
+    "screen-tools-rs.overlay",
+    "screen-tools-rs.host",
+    "screen-tools-rs.status",
+    "screen-tools-rs.pin",
+    "screen-tools-rs.zoom",
 ];
 const SHELL_DESKTOP_CLASSES: [&str; 4] = [
     "Progman",
@@ -130,7 +132,7 @@ impl Shot {
         unsafe { std::slice::from_raw_parts(self.bits, len) }.to_vec()
     }
 
-    /// Writes `<dir>/dt-ocr-YYYYMMDD-HHMMSS.png` and returns its path. The
+    /// Writes `<dir>/screen-tools-rs-YYYYMMDD-HHMMSS.png` and returns its path. The
     /// encode runs on a worker thread: WinRT async results on the UI (STA)
     /// thread only complete by pumping messages, so polling there deadlocks.
     fn save_png(&self, dir: &str) -> Result<std::path::PathBuf> {
@@ -213,20 +215,20 @@ fn flip_rows(bits: *const u8, w: i32, h: i32) -> Vec<u8> {
     out
 }
 
-/// `dt-ocr-YYYYMMDD-HHMMSS.png` in local time.
+/// `screen-tools-rs-YYYYMMDD-HHMMSS.png` in local time.
 fn file_name(st: &SYSTEMTIME) -> String {
     format!(
-        "dt-ocr-{:04}{:02}{:02}-{:02}{:02}{:02}.png",
+        "screen-tools-rs-{:04}{:02}{:02}-{:02}{:02}{:02}.png",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
     )
 }
 
-/// `dt-ocr-YYYYMMDD-HHMMSS.mp4` in local time (recording output).
+/// `screen-tools-rs-YYYYMMDD-HHMMSS.mp4` in local time (recording output).
 #[allow(dead_code)]
 pub(crate) fn record_name() -> String {
     let st = unsafe { GetLocalTime() };
     format!(
-        "dt-ocr-{:04}{:02}{:02}-{:02}{:02}{:02}.mp4",
+        "screen-tools-rs-{:04}{:02}{:02}-{:02}{:02}{:02}.mp4",
         st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
     )
 }
@@ -871,13 +873,19 @@ mod tests {
 
     #[test]
     fn env_vars_expand_and_unknown_names_stay_literal() {
-        std::env::set_var("DT_OCR_TEST_DIR", "C:\\shots");
-        assert_eq!(expand_env("%DT_OCR_TEST_DIR%\\a.png"), "C:\\shots\\a.png");
-        assert_eq!(expand_env("%DT_OCR_NOPE%\\b.png"), "%DT_OCR_NOPE%\\b.png");
+        std::env::set_var("SCREEN_TOOLS_TEST_DIR", "C:\\shots");
+        assert_eq!(
+            expand_env("%SCREEN_TOOLS_TEST_DIR%\\a.png"),
+            "C:\\shots\\a.png"
+        );
+        assert_eq!(
+            expand_env("%SCREEN_TOOLS_NOPE%\\b.png"),
+            "%SCREEN_TOOLS_NOPE%\\b.png"
+        );
         assert_eq!(expand_env("plain"), "plain");
         assert_eq!(expand_env("100% sure"), "100% sure");
         assert_eq!(
-            expand_env("a%DT_OCR_TEST_DIR%b%DT_OCR_TEST_DIR%"),
+            expand_env("a%SCREEN_TOOLS_TEST_DIR%b%SCREEN_TOOLS_TEST_DIR%"),
             "aC:\\shotsbC:\\shots"
         );
     }
@@ -893,7 +901,7 @@ mod tests {
             wSecond: 1,
             ..Default::default()
         };
-        assert_eq!(file_name(&st), "dt-ocr-20260307-090501.png");
+        assert_eq!(file_name(&st), "screen-tools-rs-20260307-090501.png");
     }
 
     #[test]

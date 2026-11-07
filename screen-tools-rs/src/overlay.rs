@@ -82,7 +82,7 @@ pub unsafe fn begin(intent: Intent) -> Result<()> {
         let _ = DestroyWindow(overlay_hwnd());
     }
     let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-    let class = w!("dt-ocr.overlay");
+    let class = w!("screen-tools-rs.overlay");
     let wc = WNDCLASSW {
         style: WNDCLASS_STYLES(0),
         lpfnWndProc: Some(wndproc),

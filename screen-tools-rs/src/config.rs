@@ -1,11 +1,11 @@
-//! dt-ocr TOML config: default frame size + hotkey bindings. One bad value
+//! screen-tools-rs TOML config: default frame size + hotkey bindings. One bad value
 //! keeps its default with a warning; only a fundamentally unreadable file is
 //! an error (desktop-tools-rs convention).
 
 use anyhow::{Context, Result};
 use dt_common::keys::Combo;
 
-pub const CONFIG_NAME: &str = "dt-ocr.toml";
+pub const CONFIG_NAME: &str = "screen-tools.toml";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -287,15 +287,15 @@ impl Default for Config {
             mask_mode: MaskMode::Box,
             mask_font: "Sarasa Term SC Nerd".to_string(),
             mask_size: MaskSize::Pt(10),
-            capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
+            capture_dir: "%USERPROFILE%\\Pictures\\screen-tools-rs".to_string(),
             notify_enabled: false,
             pin_border: PinBorder::Hatch,
             pin_line_color: 0,
             pin_hatch_color: 0x00ffff,
             flameshot: String::new(),
             external_editor: String::new(),
-            record_dir: "%USERPROFILE%\\Videos\\dt-ocr".to_string(),
-            record_name: "dt-ocr-{date}-{time}".to_string(),
+            record_dir: "%USERPROFILE%\\Videos\\screen-tools-rs".to_string(),
+            record_name: "screen-tools-rs-{date}-{time}".to_string(),
             record_fps: 30,
             record_ffmpeg: "ffmpeg".to_string(),
             record_audio: true,
@@ -329,10 +329,12 @@ fn parse_color(s: &str) -> Option<u32> {
 }
 
 pub fn parse(text: &str) -> Result<Config> {
-    let value: toml::Value = text.parse().context("dt-ocr.toml is not valid TOML")?;
+    let value: toml::Value = text
+        .parse()
+        .context("screen-tools.toml is not valid TOML")?;
     let table = value
         .as_table()
-        .context("dt-ocr.toml root must be a TOML table")?;
+        .context("screen-tools.toml root must be a TOML table")?;
     let mut cfg = Config::default();
     if let Some(frame) = table.get("frame") {
         match frame.as_table() {
@@ -646,7 +648,7 @@ mod tests {
 
     #[test]
     fn parses_repo_template() {
-        let cfg = parse(include_str!("../../dt-ocr.toml")).unwrap();
+        let cfg = parse(include_str!("../../screen-tools.toml")).unwrap();
         assert_eq!(
             cfg,
             Config {
@@ -663,15 +665,15 @@ mod tests {
                 mask_mode: MaskMode::Box,
                 mask_font: "Sarasa Term SC Nerd".to_string(),
                 mask_size: MaskSize::Pt(10),
-                capture_dir: "%USERPROFILE%\\Pictures\\dt-ocr".to_string(),
+                capture_dir: "%USERPROFILE%\\Pictures\\screen-tools-rs".to_string(),
                 notify_enabled: false,
                 pin_border: PinBorder::Hatch,
                 pin_line_color: 0,
                 pin_hatch_color: 0x00ffff,
                 flameshot: String::new(),
                 external_editor: String::new(),
-                record_dir: "%USERPROFILE%\\Videos\\dt-ocr".to_string(),
-                record_name: "dt-ocr-{date}-{time}".to_string(),
+                record_dir: "%USERPROFILE%\\Videos\\screen-tools-rs".to_string(),
+                record_name: "screen-tools-rs-{date}-{time}".to_string(),
                 record_fps: 30,
                 record_ffmpeg: "ffmpeg".to_string(),
                 record_audio: true,
@@ -761,8 +763,8 @@ mod tests {
     #[test]
     fn record_config_parses_and_clamps_fps() {
         let cfg = parse("").unwrap();
-        assert_eq!(cfg.record_dir, "%USERPROFILE%\\Videos\\dt-ocr");
-        assert_eq!(cfg.record_name, "dt-ocr-{date}-{time}");
+        assert_eq!(cfg.record_dir, "%USERPROFILE%\\Videos\\screen-tools-rs");
+        assert_eq!(cfg.record_name, "screen-tools-rs-{date}-{time}");
         assert_eq!(cfg.record_fps, 30);
         assert_eq!(cfg.record_ffmpeg, "ffmpeg");
         assert!(cfg.record_audio);

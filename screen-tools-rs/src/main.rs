@@ -1,4 +1,4 @@
-//! dt-ocr — OCR frame window + overlay (Text-Grab model).
+//! screen-tools-rs — OCR frame window + overlay (Text-Grab model).
 //!
 //! P0.2: a borderless always-on-top hollow frame marks a fixed OCR region.
 //! Draw it with the draw binding, resize it by typed SizeSpec, pin it
@@ -78,10 +78,14 @@ fn run() -> Result<()> {
     let _single = unsafe {
         use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
         use windows::Win32::System::Threading::CreateMutexW;
-        match CreateMutexW(None, true, windows::core::w!("Local\\dt-ocr.single")) {
+        match CreateMutexW(
+            None,
+            true,
+            windows::core::w!("Local\\screen-tools-rs.single"),
+        ) {
             Ok(handle) => {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
-                    logline("another dt-ocr instance is already running; exiting");
+                    logline("another screen-tools-rs instance is already running; exiting");
                     return Ok(());
                 }
                 Some(handle)
@@ -92,8 +96,33 @@ fn run() -> Result<()> {
             }
         }
     };
+    // Hold the legacy mutex too, so old and renamed executables cannot run together.
+    let _legacy_single = unsafe {
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+        match CreateMutexW(None, true, windows::core::w!("Local\\dt-ocr.single")) {
+            Ok(handle) => {
+                if GetLastError() == ERROR_ALREADY_EXISTS {
+                    logline("legacy dt-ocr instance is already running; exiting");
+                    return Ok(());
+                }
+                Some(handle)
+            }
+            Err(e) => {
+                logline(&format!(
+                    "warn: legacy single-instance mutex unavailable: {e}"
+                ));
+                None
+            }
+        }
+    };
     let cfg_path = dt_common::config::exe_dir_file(config::CONFIG_NAME)?;
-    let text = dt_common::config::load_or_create(&cfg_path, include_str!("../../dt-ocr.toml"))?;
+    let legacy_cfg = dt_common::config::exe_dir_file("dt-ocr.toml")?;
+    if dt_common::config::import_legacy(&cfg_path, &legacy_cfg)? {
+        logline("imported legacy dt-ocr.toml as screen-tools.toml");
+    }
+    let text =
+        dt_common::config::load_or_create(&cfg_path, include_str!("../../screen-tools.toml"))?;
     let mut cfg = config::parse(&text)?;
     ocr::set_engine(cfg.ocr_engine);
     ocr::set_auto(cfg.ocr_auto);
@@ -504,7 +533,7 @@ pub(crate) fn frame_pin(frame: HWND) {
 const TEMP_KEEP_SECS: u64 = 24 * 60 * 60;
 
 fn temp_capture_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("dt-ocr");
+    let dir = std::env::temp_dir().join("screen-tools-rs");
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -515,6 +544,7 @@ fn temp_capture_dir() -> std::path::PathBuf {
 fn cleanup_temp_captures() {
     let mut roots = vec![std::env::temp_dir()];
     roots.push(temp_capture_dir());
+    roots.push(std::env::temp_dir().join("dt-ocr"));
     let now = SystemTime::now();
     let mut removed = 0;
     for root in roots {
@@ -523,10 +553,10 @@ fn cleanup_temp_captures() {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_capture = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("dt-ocr-") && n.ends_with(".png"));
+            let is_capture = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                (n.starts_with("screen-tools-rs-") || n.starts_with("dt-ocr-"))
+                    && n.ends_with(".png")
+            });
             if !is_capture {
                 continue;
             }
@@ -684,7 +714,7 @@ fn set_frame_hwnd(hwnd: HWND) {
 /// Append-only log next to the exe (release builds have no console).
 /// Timestamps are plain epoch seconds — no chrono dependency for a liveness log.
 fn logline(msg: &str) {
-    let Ok(path) = dt_common::config::exe_dir_file("dt-ocr.log") else {
+    let Ok(path) = dt_common::config::exe_dir_file("screen-tools-rs.log") else {
         return;
     };
     if let Ok(mut f) = std::fs::OpenOptions::new()
