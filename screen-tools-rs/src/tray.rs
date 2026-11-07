@@ -103,7 +103,7 @@ unsafe fn add(hwnd: HWND) -> bool {
         return false;
     };
     let mut data = notify_data(hwnd, icon);
-    let tip: Vec<u16> = "screen-tools-rs".encode_utf16().collect();
+    let tip: Vec<u16> = "Screen Tools".encode_utf16().collect();
     data.szTip[..tip.len()].copy_from_slice(&tip);
     Shell_NotifyIconW(NIM_ADD, &data).as_bool()
 }

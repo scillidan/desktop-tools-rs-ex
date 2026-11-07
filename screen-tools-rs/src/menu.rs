@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const QUIT_ID: usize = 1;
-const TEXT: &str = "Quit screen-tools-rs";
+const TEXT: &str = "Quit Screen Tools";
 
 /// Shows the native popup above the cursor and returns `true` when Quit was
 /// selected. The foreground host owner is required: without it the menu can
